@@ -53,6 +53,7 @@ lz4_flex = { version = "0.11", default-features = false, features = ["safe-decod
 quick-xml = "0.41"
 mikktspace = { version = "0.3", default-features = false, features = ["glam"] }
 proptest = "1"
+stats_alloc = "0.1"
 rmcp = { version = "3.5", default-features = false, features = ["server", "macros", "transport-io"] }
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "io-std", "sync", "net", "io-util", "time"] }
 schemars = "1"

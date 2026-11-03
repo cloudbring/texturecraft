@@ -9,3 +9,7 @@ license.workspace = true
 workspace = true
 
 [dependencies]
+
+[dev-dependencies]
+proptest = { workspace = true }
+stats_alloc = { workspace = true }

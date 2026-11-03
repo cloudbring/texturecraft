@@ -1,7 +1,57 @@
+use proptest::prelude::*;
 use serde_json::{Value, json};
 use texturecraft_engine::core::Channel;
 use texturecraft_engine::geom::primitives;
 use texturecraft_engine::{Session, command_specs, execute};
+
+proptest! {
+    #![proptest_config(ProptestConfig::with_cases(32))]
+
+    #[test]
+    fn random_tile_edits_undo_redo_and_failed_edits_are_isolated(
+        script in prop::collection::vec((0u32..4, 0u32..4, any::<u16>(), any::<bool>()), 1..32),
+    ) {
+        let mut session = Session::new_project("history", primitives::plane(1.0, 1), "builtin:plane", None, 256).unwrap();
+        let layer = session.doc.project.texture_sets[0].stack[0];
+        let key = (layer, Channel::BaseColor);
+        let mut states = vec![session.doc.pixels.layers.clone()];
+        for (tx, ty, value, remove) in script {
+            session.edit("Random tile edit", |session| {
+                let image = session.doc.pixels.layer_mut(layer, Channel::BaseColor, (256, 256));
+                if remove {
+                    image.set_tile(tx, ty, None);
+                } else {
+                    image.tile_mut(tx, ty, &[0, 0, 0, 0]).unwrap().fill(value);
+                }
+                Ok(())
+            }).unwrap();
+            states.push(session.doc.pixels.layers.clone());
+        }
+        let final_pixels = session.doc.pixels.layers.clone();
+        let history_len = session.history_labels().len();
+        let failed: texturecraft_engine::Result<()> = session.edit("Fail after writing", |session| {
+            session.doc.pixels.layers.get_mut(&key).unwrap().tile_mut(0, 0, &[]).unwrap().fill(123);
+            Err(texturecraft_engine::EngineError::Other("rollback".into()))
+        });
+        prop_assert!(failed.is_err());
+        prop_assert_eq!(&session.doc.pixels.layers, &final_pixels);
+        prop_assert_eq!(session.history_labels().len(), history_len);
+        for expected in states[..states.len() - 1].iter().rev() {
+            session.undo().unwrap();
+            prop_assert_eq!(&session.doc.pixels.layers, expected);
+        }
+        prop_assert!(session.undo().is_err());
+        for expected in states.iter().skip(1) {
+            session.redo().unwrap();
+            prop_assert_eq!(&session.doc.pixels.layers, expected);
+        }
+        prop_assert!(session.redo().is_err());
+        prop_assert_eq!(&session.doc.pixels.layers, &final_pixels);
+        session.undo().unwrap();
+        session.redo().unwrap();
+        prop_assert_eq!(&session.doc.pixels.layers, &final_pixels);
+    }
+}
 
 fn session() -> Session {
     let mut s = Session::new_project("t", primitives::sphere(1.0, 48, 24), "builtin:sphere", None, 256).unwrap();

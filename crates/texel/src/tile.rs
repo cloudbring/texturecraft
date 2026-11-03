@@ -1,6 +1,6 @@
 //! Sparse, copy-on-write tiled images of `u16` components.
 
-use std::sync::Arc;
+use std::{fmt, sync::Arc};
 
 /// Tile edge in texels.
 pub const TILE: u32 = 64;
@@ -10,8 +10,43 @@ pub const TILE_AREA: usize = (TILE * TILE) as usize;
 /// A tile's texel data: `TILE_AREA × comps` interleaved components.
 pub type TileData = Arc<Vec<u16>>;
 
-/// An image split into 64×64 tiles; unallocated tiles read as zero. Cloning shares every tile,
-/// so snapshots for undo cost one `Arc` clone per allocated tile.
+const DIRECTORY_CHUNK: usize = 64;
+
+#[derive(Clone, PartialEq)]
+struct TileDirectory {
+    chunks: Arc<Vec<Arc<[Option<TileData>]>>>,
+}
+
+impl TileDirectory {
+    fn new(len: usize) -> Self {
+        let chunks = (0..len).step_by(DIRECTORY_CHUNK).map(|start| Arc::from(vec![None; DIRECTORY_CHUNK.min(len - start)])).collect();
+        Self { chunks: Arc::new(chunks) }
+    }
+
+    fn get(&self, index: usize) -> Option<&Option<TileData>> {
+        self.chunks.get(index / DIRECTORY_CHUNK)?.get(index % DIRECTORY_CHUNK)
+    }
+
+    fn get_mut(&mut self, index: usize) -> Option<&mut Option<TileData>> {
+        self.get(index)?;
+        let chunk = Arc::make_mut(&mut self.chunks).get_mut(index / DIRECTORY_CHUNK)?;
+        Arc::make_mut(chunk).get_mut(index % DIRECTORY_CHUNK)
+    }
+
+    fn iter(&self) -> impl Iterator<Item = &Option<TileData>> {
+        self.chunks.iter().flat_map(|chunk| chunk.iter())
+    }
+}
+
+impl fmt::Debug for TileDirectory {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.debug_list().entries(self.iter()).finish()
+    }
+}
+
+/// An image split into 64×64 tiles; unallocated tiles read as zero. Cloning shares the directory
+/// with one `Arc` bump, independent of tile count. The first write after sharing copies the
+/// outer chunk handles and at most 64 tile handles; pixel data remains separately copy-on-write.
 #[derive(Clone, Debug, PartialEq)]
 pub struct TileImage {
     width: u32,
@@ -19,7 +54,7 @@ pub struct TileImage {
     comps: usize,
     tiles_x: u32,
     tiles_y: u32,
-    tiles: Vec<Option<TileData>>,
+    tiles: TileDirectory,
 }
 
 impl TileImage {
@@ -28,7 +63,7 @@ impl TileImage {
         let (width, height) = (width.max(1), height.max(1));
         let tiles_x = width.div_ceil(TILE);
         let tiles_y = height.div_ceil(TILE);
-        TileImage { width, height, comps: comps.clamp(1, 4), tiles_x, tiles_y, tiles: vec![None; (tiles_x * tiles_y) as usize] }
+        TileImage { width, height, comps: comps.clamp(1, 4), tiles_x, tiles_y, tiles: TileDirectory::new((tiles_x * tiles_y) as usize) }
     }
 
     pub fn width(&self) -> u32 {
@@ -142,9 +177,11 @@ impl TileImage {
 
     /// Drop tiles whose every texel is zero.
     pub fn prune_empty(&mut self) {
-        for t in &mut self.tiles {
-            if t.as_ref().is_some_and(|d| d.iter().all(|v| *v == 0)) {
-                *t = None;
+        for index in 0..(self.tiles_x * self.tiles_y) as usize {
+            if self.tiles.get(index).and_then(Option::as_ref).is_some_and(|data| data.iter().all(|value| *value == 0))
+                && let Some(slot) = self.tiles.get_mut(index)
+            {
+                *slot = None;
             }
         }
     }
@@ -177,6 +214,60 @@ pub fn from_u16_signed(v: u16) -> f32 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn directory_snapshots_only_copy_the_written_chunk() {
+        let mut image = TileImage::new(65 * TILE, TILE, 1);
+        for tx in 0..65 {
+            image.tile_mut(tx, 0, &[7]).unwrap();
+        }
+        let snapshot = image.clone();
+        assert!(Arc::ptr_eq(&image.tiles.chunks, &snapshot.tiles.chunks));
+        assert_eq!(Arc::strong_count(image.tile_handle(0, 0).unwrap()), 1);
+        assert_eq!(image.tiles.chunks[0].len(), 64);
+        assert_eq!(image.tiles.chunks[1].len(), 1);
+        image.tile_mut(63, 0, &[]).unwrap()[0] = 9;
+        assert!(!Arc::ptr_eq(&image.tiles.chunks, &snapshot.tiles.chunks));
+        assert!(!Arc::ptr_eq(&image.tiles.chunks[0], &snapshot.tiles.chunks[0]));
+        assert!(Arc::ptr_eq(&image.tiles.chunks[1], &snapshot.tiles.chunks[1]));
+        assert!(Arc::ptr_eq(image.tile_handle(62, 0).unwrap(), snapshot.tile_handle(62, 0).unwrap()));
+        let chunk = Arc::as_ptr(&image.tiles.chunks[0]);
+        image.tile_mut(62, 0, &[]).unwrap()[0] = 11;
+        assert!(std::ptr::eq(chunk, Arc::as_ptr(&image.tiles.chunks[0])));
+        image.set_tile(64, 0, None);
+        assert_eq!(snapshot.tile(63, 0).unwrap()[0], 7);
+        assert_eq!(snapshot.tile(64, 0).unwrap()[0], 7);
+        assert_eq!(image.allocated().last(), Some((63, 0)));
+    }
+
+    #[test]
+    fn no_op_pruning_and_invalid_writes_keep_directory_shared() {
+        let mut image = TileImage::new(65 * TILE, TILE, 1);
+        image.tile_mut(64, 0, &[7]).unwrap();
+        let snapshot = image.clone();
+        image.prune_empty();
+        image.set_tile(65, 0, None);
+        assert!(image.tile_mut(0, 1, &[]).is_none());
+        assert!(Arc::ptr_eq(&image.tiles.chunks, &snapshot.tiles.chunks));
+        image.tile_mut(64, 0, &[]).unwrap().fill(0);
+        image.prune_empty();
+        assert_eq!(image.allocated_count(), 0);
+        assert_eq!(snapshot.allocated_count(), 1);
+    }
+
+    #[test]
+    fn directory_debug_and_equality_keep_flat_value_semantics() {
+        let mut directory = TileDirectory::new(65);
+        let mut dense = vec![None; 65];
+        dense[64] = Some(Arc::new(vec![7]));
+        *directory.get_mut(64).unwrap() = dense[64].clone();
+        assert_eq!(format!("{directory:?}"), format!("{dense:?}"));
+        let mut independent = TileDirectory::new(65);
+        *independent.get_mut(64).unwrap() = Some(Arc::new(vec![7]));
+        assert_eq!(directory, independent);
+        *independent.get_mut(64).unwrap() = None;
+        assert_ne!(directory, independent);
+    }
 
     #[test]
     fn unallocated_tiles_read_zero_and_writes_allocate() {
