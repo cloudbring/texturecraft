@@ -909,9 +909,10 @@ fn over(c: &ChanPlan, mode: BlendMode, v: [f32; 3], cov: f32, p: [f32; 3], a: f3
     if a <= 0.0 {
         return (v, cov);
     }
-    let b = if cov > 0.0 { blend_chan(c, mode, v, p) } else { p };
+    let b = blend_chan(c, mode, v, p);
     let nc = a + cov * (1.0 - a);
-    (mix3(v, b, a / nc.max(1e-5)), nc)
+    let value = std::array::from_fn(|i| ((1.0 - a) * cov * v[i] + (1.0 - cov) * a * p[i] + a * cov * b[i]) / nc);
+    (value, nc)
 }
 
 /// The plain UV projection a decal's frame coordinates are sampled through.
@@ -2087,6 +2088,78 @@ mod tests {
 
     fn close(a: [f32; 3], b: [f32; 3]) -> bool {
         (0..3).all(|i| (a[i] - b[i]).abs() < 2e-4)
+    }
+
+    #[test]
+    fn partial_coverage_multiply_witness() {
+        let channel =
+            ChanPlan { ch: 0, kind: ChannelKind::Color, comps: 3, blend: BlendMode::Multiply, opacity: 1.0, data: None, effects: Vec::new(), start: None };
+        let (value, coverage) = over(&channel, BlendMode::Multiply, [0.5; 3], 0.5, [0.8; 3], 0.5);
+        let expected = ((1.0 - 0.5) * 0.5 * 0.5 + (1.0 - 0.5) * 0.5 * 0.8 + 0.5 * 0.5 * (0.5 * 0.8)) / 0.75;
+        println!("current={} standard={expected} coverage={coverage}", value[0]);
+        assert!((value[0] - expected).abs() < 1e-6);
+        assert!((expected - 0.56666666_f32).abs() < 1e-6);
+        assert_eq!(coverage, 0.75);
+    }
+
+    #[test]
+    fn partial_coverage_matches_source_over_for_every_blend_mode() {
+        let samples = [0.0, 0.25, 0.5, 0.75, 1.0];
+        for comps in [1, 3] {
+            let channel =
+                ChanPlan { ch: 0, kind: ChannelKind::Color, comps, blend: BlendMode::Normal, opacity: 1.0, data: None, effects: Vec::new(), start: None };
+            for mode in BlendMode::all() {
+                for backdrop in samples {
+                    for coverage in samples {
+                        for source in samples {
+                            for alpha in samples {
+                                let cb = [backdrop; 3];
+                                let cs = [source; 3];
+                                let blended = blend_chan(&channel, mode, cb, cs);
+                                let expected_alpha = alpha + coverage * (1.0 - alpha);
+                                let expected = if alpha == 0.0 {
+                                    cb
+                                } else {
+                                    std::array::from_fn(|i| {
+                                        ((1.0 - alpha) * coverage * cb[i] + (1.0 - coverage) * alpha * cs[i] + alpha * coverage * blended[i]) / expected_alpha
+                                    })
+                                };
+                                let (actual, actual_alpha) = over(&channel, mode, cb, coverage, cs, alpha);
+                                assert!((actual_alpha - expected_alpha).abs() < 1e-6, "{mode:?} {backdrop} {coverage} {source} {alpha}");
+                                assert!(
+                                    close(actual, expected),
+                                    "{mode:?} comps={comps} backdrop={backdrop} coverage={coverage} source={source} alpha={alpha}: {actual:?} != {expected:?}"
+                                );
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn source_over_preserves_tiny_nonzero_coverage() {
+        let channel =
+            ChanPlan { ch: 0, kind: ChannelKind::Color, comps: 3, blend: BlendMode::Multiply, opacity: 1.0, data: None, effects: Vec::new(), start: None };
+        let (value, coverage) = over(&channel, BlendMode::Multiply, [0.5; 3], 0.0, [0.8; 3], 1e-6);
+        assert!(close(value, [0.8; 3]));
+        assert_eq!(coverage, 1e-6);
+    }
+
+    #[test]
+    fn source_over_blends_distinct_rgb_components() {
+        let channel =
+            ChanPlan { ch: 0, kind: ChannelKind::Color, comps: 3, blend: BlendMode::Normal, opacity: 1.0, data: None, effects: Vec::new(), start: None };
+        let backdrop = [0.25, 0.5, 0.75];
+        let source = [0.75, 0.25, 0.5];
+        for mode in BlendMode::all() {
+            let blended = blend3(mode, backdrop, source);
+            let expected = std::array::from_fn(|i| (0.5 * 0.25 * backdrop[i] + 0.75 * 0.5 * source[i] + 0.5 * 0.25 * blended[i]) / 0.625);
+            let (actual, alpha) = over(&channel, mode, backdrop, 0.25, source, 0.5);
+            assert!(close(actual, expected), "{mode:?}: {actual:?} != {expected:?}");
+            assert_eq!(alpha, 0.625);
+        }
     }
 
     #[test]
