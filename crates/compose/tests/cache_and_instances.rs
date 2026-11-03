@@ -547,7 +547,19 @@ fn gaussian_blurs_preserve_coverage_and_tile_grouping() {
         for tile in all_tiles(RES, RES) {
             composite_tiles(&inputs(&f, 0, &images, &baked), &mut separate, &[tile]);
         }
-        assert!(separate == expected, "radius={radius}: tile grouping changes Gaussian output");
+        let mut max_error = 0.0f32;
+        for channel in f.project.texture_sets[0].channel_list() {
+            for y in 0..RES {
+                for x in 0..RES {
+                    for (actual, expected) in separate.value(channel, x, y).iter().zip(expected.value(channel, x, y)) {
+                        let error = (actual - expected).abs();
+                        max_error = max_error.max(error);
+                        assert!(error <= 1e-4, "radius={radius}, {channel:?}, ({x},{y}): region/full error={error}");
+                    }
+                }
+            }
+        }
+        eprintln!("coverage/tile grouping, radius={radius}: max error={max_error:.9}");
         check_cached(&f, 0, base);
     }
 }

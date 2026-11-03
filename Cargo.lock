@@ -724,7 +724,7 @@ dependencies = [
 [[package]]
 name = "craft-blur"
 version = "0.1.0"
-source = "git+https://github.com/cloudbring/craft-libs?branch=algo%2F2-craft-blur-midband#d98d0605bb63a0862330f3885605ec1def323643"
+source = "git+https://github.com/cloudbring/craft-libs?branch=algo%2Fintegration#14aa0474ba46bc48469a0d119ca421bc8c0c3f40"
 
 [[package]]
 name = "craft-fonts-build"

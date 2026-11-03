@@ -65,6 +65,17 @@ dirty tiles are recomposited
 (a stroke dirties the tiles it touches), then padded, converted to display formats and uploaded to
 the GPU.
 
+Neighbourhood-filter fields use bounded rectangles of adjacent requested tiles, evaluating their
+source only over those tiles plus the filter halo. Gaussian-derived filters call craft-blur's
+`blur_region` with its finite support or `ceil(8σ)` recursive halo; distant dirty tiles do not
+inflate a shared bounding rectangle. Anchor readers also request the lower fields needed by
+their halo. Full-atlas requests share a full-plane evaluation across composite blocks. These
+atlas filters remain zero-extended and coverage-weighted, not periodic: uncovered UV gaps do
+not contribute black samples, and the atlas edges are not wrapped.
+Sparse recursive results are approximate: regression tests require at most `1e-4` unit-range
+error against full-plane masks, content and quantized composites, including atlas edges,
+uncovered UV gaps and chained anchor readers.
+
 The CPU compositor is the reference for everything users see and export. Export
 (`formats::export`) reads the same composite, adds height-to-normal (Sobel) combined with the
 normal channel and baked normals by reoriented normal mapping, and packs channels per preset.
