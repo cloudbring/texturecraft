@@ -1,0 +1,21 @@
+Dependency layering (xtask/src/layers.rs)
+
+
+crate                        layer    workspace deps
+texturecraft                 exempt   texturecraft-automation, texturecraft-engine, texturecraft-ui-egui
+texturecraft-automation      L4       texturecraft-engine, texturecraft-formats, texturecraft-render
+texturecraft-bake            L1       texturecraft-core, texturecraft-geom, texturecraft-texel
+texturecraft-cli             exempt   texturecraft-automation, texturecraft-engine
+texturecraft-compose         L1       texturecraft-core, texturecraft-geom, texturecraft-texel
+texturecraft-core            L0       
+texturecraft-engine          L3       texturecraft-bake, texturecraft-compose, texturecraft-core, texturecraft-formats, texturecraft-geom, texturecraft-paint, texturecraft-texel
+texturecraft-formats         L2       texturecraft-compose, texturecraft-core, texturecraft-geom, texturecraft-texel
+texturecraft-geom            L0       
+texturecraft-paint           L2       texturecraft-compose, texturecraft-core, texturecraft-geom, texturecraft-texel
+texturecraft-render          L3       texturecraft-bake, texturecraft-compose, texturecraft-core, texturecraft-geom, texturecraft-texel
+texturecraft-texel           L0       
+texturecraft-ui-egui         L5       texturecraft-engine, texturecraft-render
+texturecraft-web             exempt   texturecraft-engine, texturecraft-ui-egui
+xtask                        exempt   
+
+OK: 15 crates, no layering violations.

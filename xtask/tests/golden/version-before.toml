@@ -1,0 +1,11 @@
+[workspace]
+members = []
+
+[workspace.package]
+version = "0.3.0"
+edition = "2024"
+
+[package]
+name = "version-fixture"
+version.workspace = true
+edition.workspace = true

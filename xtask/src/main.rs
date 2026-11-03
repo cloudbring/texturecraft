@@ -1,13 +1,14 @@
 //! Workspace tooling: `cargo xtask <command>`.
 //!
-//! Pure Rust (std + serde_json). `cargo` itself is invoked through `std::process::Command`.
+//! Pure Rust (craft-xtask + serde_json). `cargo` itself is invoked through `std::process::Command`.
+#![deny(clippy::unwrap_used, clippy::expect_used, clippy::panic, clippy::unimplemented, clippy::todo, clippy::unreachable)]
 
-mod ico;
-mod layers;
-mod version;
+mod config;
 
 use std::path::{Path, PathBuf};
 use std::process::{Command, ExitCode};
+
+use craft_xtask::{Cargo, ico, layers, version};
 
 const USAGE: &str = "\
 usage: cargo xtask <command>
@@ -26,16 +27,20 @@ commands:
 
 fn main() -> ExitCode {
     let args: Vec<String> = std::env::args().skip(1).collect();
-    let rest: Vec<&str> = args.iter().skip(1).map(String::as_str).collect();
+    let task_args = args.get(1..).unwrap_or_default();
     let result = match args.first().map(String::as_str) {
-        Some("layers") => cmd_layers(),
+        Some("layers") => config::run_layers(&config::layers(&root()), task_args),
         Some("wasm") => cmd_wasm(),
         Some("ci") => cmd_ci(),
-        Some("version") => version::run(&root(), &rest),
-        Some("ico") => ico::run_ico(&rest),
-        Some("icns") => ico::run_icns(&rest),
+        Some("version") => version::run(&config::version(&root()), task_args),
+        Some("ico") => ico::run(&ico::Config::default(), task_args),
+        Some("icns") => ico::run_icns(&ico::Config::default(), task_args),
         Some("-h" | "--help" | "help") | None => {
             print!("{USAGE}");
+            println!("\nShared task syntax:");
+            for help in [version::cli_help(), layers::cli_help(), ico::cli_help()] {
+                println!("  {help}");
+            }
             Ok(())
         }
         Some(other) => Err(format!("unknown command `{other}`\n\n{USAGE}")),
@@ -67,47 +72,6 @@ pub fn run(mut cmd: Command, what: &str) -> Result<(), String> {
     if status.success() { Ok(()) } else { Err(format!("{what}: exited with {status}")) }
 }
 
-/// `cargo metadata --no-deps`: the workspace members and their declared dependencies.
-fn metadata() -> Result<serde_json::Value, String> {
-    let out = cargo().args(["metadata", "--format-version", "1", "--no-deps"]).output().map_err(|e| format!("cargo metadata: {e}"))?;
-    if !out.status.success() {
-        return Err(format!("cargo metadata failed:\n{}", String::from_utf8_lossy(&out.stderr)));
-    }
-    serde_json::from_slice(&out.stdout).map_err(|e| format!("cargo metadata: bad JSON: {e}"))
-}
-
-fn cmd_layers() -> Result<(), String> {
-    let crates = layers::from_metadata(&metadata()?)?;
-    println!("Dependency layering (xtask/src/layers.rs)\n");
-    for (dir, _) in layers::TABLE {
-        let present = crates.iter().any(|c| c.name == layers::package(dir));
-        if !present {
-            if root().join("crates").join(dir).join("Cargo.toml").is_file() {
-                println!("note: crates/{dir} has a Cargo.toml but is not a workspace member; not checked");
-            } else {
-                println!("skip: crates/{dir} (no Cargo.toml yet)");
-            }
-        }
-    }
-    println!("\n{:<28} {:<8} workspace deps", "crate", "layer");
-    for c in &crates {
-        let ws: Vec<&str> = c.deps.iter().filter(|d| d.workspace).map(|d| d.name.as_str()).collect();
-        println!("{:<28} {:<8} {}", c.name, layers::describe(&c.name), ws.join(", "));
-    }
-    let violations = layers::check(&crates);
-    println!();
-    if violations.is_empty() {
-        println!("OK: {} crates, no layering violations.", crates.len());
-        Ok(())
-    } else {
-        println!("{} violation(s):", violations.len());
-        for v in &violations {
-            println!("  - {v}");
-        }
-        Err(format!("{} layering violation(s)", violations.len()))
-    }
-}
-
 /// Packages that must build for wasm32-unknown-unknown, in dependency order.
 const WASM_PACKAGES: &[&str] = &[
     "texturecraft-core",
@@ -124,7 +88,8 @@ const WASM_PACKAGES: &[&str] = &[
 ];
 
 fn cmd_wasm() -> Result<(), String> {
-    let members = layers::from_metadata(&metadata()?)?;
+    let meta = Cargo { root: root(), ..Cargo::default() }.metadata(false)?;
+    let members = layers::from_metadata(&meta)?;
     let mut results = Vec::new();
     for pkg in WASM_PACKAGES {
         if !members.iter().any(|c| c.name == *pkg) {
@@ -158,14 +123,14 @@ fn cmd_ci() -> Result<(), String> {
         ("fmt", Box::new(cargo_step(&["fmt", "--all", "--", "--check"]))),
         ("clippy", Box::new(cargo_step(&["clippy", "--workspace", "--all-targets", "--", "-D", "warnings"]))),
         ("test", Box::new(cargo_step(&["test", "--workspace"]))),
-        ("layers", Box::new(cmd_layers)),
+        ("layers", Box::new(|| config::run_layers(&config::layers(&root()), &[]))),
         ("wasm", Box::new(cmd_wasm)),
     ];
     for (i, (name, step)) in steps.iter().enumerate() {
         eprintln!("\n=== ci: {name} ===");
         if let Err(e) = step() {
             println!("\nCI summary:");
-            for (done, _) in &steps[..i] {
+            for (done, _) in steps.get(..i).unwrap_or_default() {
                 println!("  ok    {done}");
             }
             println!("  FAIL  {name}: {e}");
