@@ -67,6 +67,8 @@ rustix = { version = "1", default-features = false, features = ["std", "fs", "pr
 craft-ui = { git = "https://github.com/storytold/craft-libs", rev = "f8f8829cc7be65d466d687dae381d1ca60e31242", features = ["serde"] }
 # Who draws the window frame, and the app-drawn strip as the title bar (crates/ui-egui/src/titlebar.rs).
 craft-window = { git = "https://github.com/storytold/craft-libs", rev = "f8f8829cc7be65d466d687dae381d1ca60e31242", features = ["egui"] }
+# TODO: repoint to storytold/craft-libs after upstream merge
+craft-tiledir = { git = "https://github.com/cloudbring/craft-libs", branch = "algo/integration" }
 
 # egui 0.37 and winit: the suite's forks (storytold/egui, storytold/winit), as craft-libs pins them.
 [patch.crates-io]

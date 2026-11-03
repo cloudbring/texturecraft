@@ -819,6 +819,11 @@ dependencies = [
 ]
 
 [[package]]
+name = "craft-tiledir"
+version = "0.1.0"
+source = "git+https://github.com/cloudbring/craft-libs?branch=algo%2Fintegration#5ac933bbe92d82a587a5c48ce135fa1d4d14b423"
+
+[[package]]
 name = "craft-ui"
 version = "0.1.0"
 source = "git+https://github.com/storytold/craft-libs?rev=f8f8829cc7be65d466d687dae381d1ca60e31242#f8f8829cc7be65d466d687dae381d1ca60e31242"
@@ -4138,7 +4143,7 @@ dependencies = [
 name = "texturecraft-texel"
 version = "0.3.0"
 dependencies = [
- "proptest",
+ "craft-tiledir",
  "stats_alloc",
 ]
 

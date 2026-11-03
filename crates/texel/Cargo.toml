@@ -9,7 +9,7 @@ license.workspace = true
 workspace = true
 
 [dependencies]
+craft-tiledir = { workspace = true }
 
 [dev-dependencies]
-proptest = { workspace = true }
 stats_alloc = { workspace = true }

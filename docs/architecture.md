@@ -72,46 +72,22 @@ normal channel and baked normals by reoriented normal mapping, and packs channel
 ## Undo
 
 `Session::edit` snapshots the `Document` (project + pixels + baked maps + resources) before a
-change and restores it if the change fails. Each `TileImage` shares its dense directory through
-an `Arc` of chunk handles, each pointing to up to 64 tile slots. An image snapshot costs one
-reference-count bump and no allocation, independent of tile count. Reads stay O(1). The first
-write to a shared directory copies O(ceil(tiles / 64)) chunk handles, then at most 64 tile
-handles for a shared chunk. Further writes to that now-unique chunk do not copy the directory.
-Pixel payloads remain separately copy-on-write (`Arc<Vec<u16>>`): only changed tiles are copied.
-Document snapshots still clone their other collections; this is not O(1) for the whole document.
-Snapshot clones no longer increment each pixel handle's strong count; the handle pointers,
-pixels, flat debug representation, row-major iteration and project serialization are unchanged.
+change and restores it if the change fails. Each `TileImage` stores its tiles in a shared
+`craft_tiledir::DenseTileDir<TileData>` (64-slot persistent chunks). An image snapshot costs one
+`Arc` bump and no allocation; the first write after sharing copies O(ceil(tiles / 64)) chunk
+handles and at most 64 slot handles, while pixel payloads remain copy-on-write (`Arc<Vec<u16>>`)
+and row-major iteration (`iter_row_major`), flat `Debug` formatting and serialization stay unchanged.
 
 ### Tile directory measurements (#35)
 
-Measured on 2026-11-03, Apple M6 (arm64), Rust 1.96.0, release profile. The ignored
-`crates/texel/tests/snapshot_bench.rs` test compares a model of the former
-`Vec<Option<Arc<Vec<u16>>>>` directory with `TileImage`. Both start with a 4096×4096 RGBA
-u16 texture: 4096 separately allocated 64×64 tiles. History stays alive during measurement.
-Each result is the median of nine runs, after warmup, alternating implementation order.
-Setup, preallocating the history vector, validation and destruction are outside the measured
-region. `stats_alloc` counts allocation calls and requested bytes; no reallocations occur.
-The sparse script rewrites one tile per step, visiting different chunks; the dense script
-retains one snapshot and rewrites every component of every tile.
+Measured on Apple M6 (arm64, release profile) via `crates/texel/tests/snapshot_bench.rs`
+(4096×4096 RGBA u16, 4096 allocated 64×64 tiles, median of 9 alternating runs with `stats_alloc`):
 
 | Workload | Vec time (ms) | Chunked time (ms) | Vec allocations | Chunked allocations | Vec allocated bytes | Chunked allocated bytes |
 |---|---:|---:|---:|---:|---:|---:|
 | 200 snapshots only | 0.735708 | 0.000500 | 200 | 0 | 6,553,600 | 0 |
 | 200 one-tile history edits | 0.977959 | 0.266916 | 600 | 1,000 | 13,115,200 | 6,880,000 |
 | One full-image history edit | 3.950917 | 3.887208 | 8,193 | 8,258 | 134,414,336 | 134,416,424 |
-
-Sparse history edits are 3.66× faster and request 47.5% fewer bytes, at the cost of more,
-smaller allocations. The dense edit adds 65 allocation calls and 2088 requested bytes;
-its near-flat timing is not evidence of a meaningful speedup. These figures include the
-instrumented allocator's overhead, not just directory work; they do not measure whole-session
-editing, compositor invalidation or peak resident memory.
-
-Reproduce with the repository's CI toolchain (1.96.0):
-
-```sh
-CARGO_TARGET_DIR=/Users/emm/ArtCraft/worktrees/texturecraft-35/target-35 \
-  cargo test -p texturecraft-texel --release --test snapshot_bench -- --ignored --nocapture --test-threads=1
-```
 
 ## Rendering
 
