@@ -1,5 +1,6 @@
 //! Sparse, copy-on-write tiled images of `u16` components.
 
+use rayon::prelude::*;
 use std::sync::Arc;
 
 /// Tile edge in texels.
@@ -400,7 +401,7 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "manual 8192² -> 1024² timing"]
+    #[ignore = "manual 8192² reduction timing"]
     fn benchmark_large_reduction() {
         let mut image = TileImage::new(8192, 8192, 1);
         for y in 0..image.tiles_y() {
@@ -409,9 +410,52 @@ mod tests {
                 tile.fill(32768);
             }
         }
-        let start = std::time::Instant::now();
-        let result = image.resampled(1024, 1024, &[0]);
-        println!("8192² -> 1024²: {:.1} ms; sample {}", start.elapsed().as_secs_f64() * 1000.0, result.get(0, 0)[0]);
+        for size in [1024, 1500] {
+            let start = std::time::Instant::now();
+            let result = image.resampled(size, size, &[0]);
+            println!("8192² -> {size}²: {:.1} ms; sample {}", start.elapsed().as_secs_f64() * 1000.0, result.get(0, 0)[0]);
+        }
+    }
+
+    #[test]
+    fn integer_box_matches_weighted_reference_across_policies_and_sparse_tiles() {
+        for (source_width, source_height, width, height) in [(256, 256, 128, 128), (256, 256, 64, 64), (256, 256, 32, 32), (390, 260, 130, 65)] {
+            for comps in 1..=4 {
+                let mut image = TileImage::new(source_width, source_height, comps);
+                let empty = [1100, 2200, 3300, 4400];
+                for ty in 0..image.tiles_y() {
+                    for tx in 0..image.tiles_x() {
+                        if (tx + ty) % 5 == 0 {
+                            continue;
+                        }
+                        let tile = image.tile_mut(tx, ty, &empty).unwrap();
+                        for (index, pixel) in tile.chunks_exact_mut(comps).enumerate() {
+                            for (component, value) in pixel.iter_mut().enumerate() {
+                                *value = ((tx as usize * 437 + ty as usize * 631 + index * 7919 + component * 1013) % 65536) as u16;
+                            }
+                        }
+                    }
+                }
+                for policy in [ResamplePolicy::Continuous, ResamplePolicy::Color, ResamplePolicy::Coverage, ResamplePolicy::Normal] {
+                    let reduced = image.resampled_with(width, height, &empty, policy);
+                    for ty in 0..reduced.tiles_y() {
+                        for tx in 0..reduced.tiles_x() {
+                            let reference = image.filtered_tile(width, height, tx, ty, &empty, policy);
+                            let actual = reduced.tile(tx, ty);
+                            assert_eq!(actual.is_some(), reference.is_some(), "{comps} {policy:?} ({tx}, {ty})");
+                            if let (Some(actual), Some(reference)) = (actual, reference) {
+                                for (index, (&observed, expected)) in actual.iter().zip(reference).enumerate() {
+                                    assert!(
+                                        observed.abs_diff(expected) <= 1,
+                                        "{source_width}x{source_height} -> {width}x{height}: {comps} {policy:?} ({tx}, {ty}) [{index}] {observed} != {expected}"
+                                    );
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
     }
 }
 
@@ -428,6 +472,14 @@ impl TileImage {
     pub fn resampled_with(&self, width: u32, height: u32, empty: &[u16], policy: ResamplePolicy) -> TileImage {
         let mut out = TileImage::new(width, height, self.comps);
         if self.allocated_count() == 0 {
+            return out;
+        }
+        if self.integer_box_ratio(out.width, out.height, policy).is_some() {
+            out.tiles.par_chunks_mut(out.tiles_x as usize).enumerate().for_each(|(ty, row)| {
+                for (tx, slot) in row.iter_mut().enumerate() {
+                    *slot = self.resampled_tile_with(width, height, tx as u32, ty as u32, empty, policy).map(Arc::new);
+                }
+            });
             return out;
         }
         for ty in 0..out.tiles_y {
@@ -454,6 +506,112 @@ impl TileImage {
         if tx >= dw.div_ceil(TILE) || ty >= dh.div_ceil(TILE) || self.allocated_count() == 0 {
             return None;
         }
+        if let Some((ratio_x, ratio_y)) = self.integer_box_ratio(dw, dh, policy) {
+            return self.box_reduced_tile((dw, dh), (tx, ty), (ratio_x, ratio_y), empty, policy);
+        }
+        self.filtered_tile(dw, dh, tx, ty, empty, policy)
+    }
+
+    fn integer_box_ratio(&self, width: u32, height: u32, policy: ResamplePolicy) -> Option<(u32, u32)> {
+        (policy != ResamplePolicy::Nearest
+            && self.width.is_multiple_of(width)
+            && self.height.is_multiple_of(height)
+            && self.width / width >= 2
+            && self.height / height >= 2)
+            .then(|| (self.width / width, self.height / height))
+    }
+
+    fn box_reduced_tile(
+        &self,
+        (width, height): (u32, u32),
+        (tx, ty): (u32, u32),
+        (ratio_x, ratio_y): (u32, u32),
+        empty: &[u16],
+        policy: ResamplePolicy,
+    ) -> Option<Vec<u16>> {
+        let x_count = ((tx + 1) * TILE).min(width) - tx * TILE;
+        let y_count = ((ty + 1) * TILE).min(height) - ty * TILE;
+        let x_start = tx * TILE * ratio_x;
+        let y_start = ty * TILE * ratio_y;
+        let x_end = x_start + x_count * ratio_x - 1;
+        let y_end = y_start + y_count * ratio_y - 1;
+        if !(y_start / TILE..=y_end / TILE).any(|sy| (x_start / TILE..=x_end / TILE).any(|sx| self.is_allocated(sx, sy))) {
+            return None;
+        }
+
+        let comps = self.comps;
+        let coverage = matches!(policy, ResamplePolicy::Color | ResamplePolicy::Coverage | ResamplePolicy::Normal) && (comps == 2 || comps == 4);
+        let mut defaults = [0u16; 4];
+        for (slot, value) in defaults.iter_mut().zip(empty) {
+            *slot = *value;
+        }
+        let mut rows = vec![[0u64; 4]; (y_count * ratio_y * x_count) as usize];
+        for sy in y_start..=y_end {
+            let row = &mut rows[((sy - y_start) * x_count) as usize..(((sy - y_start) + 1) * x_count) as usize];
+            for (lx, sums) in row.iter_mut().enumerate() {
+                let mut sx = x_start + lx as u32 * ratio_x;
+                let end = sx + ratio_x;
+                while sx < end {
+                    let length = (end - sx).min(TILE - sx % TILE);
+                    if let Some(tile) = self.tile(sx / TILE, sy / TILE) {
+                        let base = ((sy % TILE * TILE + sx % TILE) as usize) * comps;
+                        for pixel in tile[base..base + length as usize * comps].chunks_exact(comps) {
+                            let alpha = if coverage { u64::from(pixel[comps - 1]) } else { 1 };
+                            for component in 0..comps {
+                                sums[component] += u64::from(pixel[component]) * if coverage && component != comps - 1 { alpha } else { 1 };
+                            }
+                        }
+                    } else {
+                        let alpha = if coverage { u64::from(defaults[comps - 1]) } else { 1 };
+                        for component in 0..comps {
+                            sums[component] +=
+                                u64::from(defaults[component]) * (if coverage && component != comps - 1 { alpha } else { 1 }) * u64::from(length);
+                        }
+                    }
+                    sx += length;
+                }
+            }
+        }
+
+        let scale = 1.0 / (f64::from(ratio_x) * f64::from(ratio_y));
+        let mut data = vec![0u16; TILE_AREA * comps];
+        for ly in 0..y_count as usize {
+            for lx in 0..x_count as usize {
+                let mut sums = [0u64; 4];
+                for sy in 0..ratio_y as usize {
+                    let row = &rows[(ly * ratio_y as usize + sy) * x_count as usize + lx];
+                    for component in 0..comps {
+                        sums[component] += row[component];
+                    }
+                }
+                let mut value = [0.0f64; 4];
+                for component in 0..comps {
+                    value[component] = sums[component] as f64 * scale;
+                }
+                if coverage {
+                    let alpha = value[comps - 1].clamp(0.0, 65535.0) / 65535.0;
+                    for component in 0..comps - 1 {
+                        value[component] = if alpha > 1e-12 { value[component] / 65535.0 / alpha } else { 0.0 };
+                    }
+                }
+                if policy == ResamplePolicy::Normal && comps >= 3 && (!coverage || value[comps - 1] > 0.0) {
+                    let vector = [value[0], value[1], value[2]].map(|part| part / 32767.5 - 1.0);
+                    let length = vector.iter().map(|part| part * part).sum::<f64>().sqrt();
+                    let normal = if length > 1e-12 { vector.map(|part| part / length) } else { [0.0, 0.0, 1.0] };
+                    for component in 0..3 {
+                        value[component] = (normal[component] + 1.0) * 32767.5;
+                    }
+                }
+                let base = (ly * TILE as usize + lx) * comps;
+                for component in 0..comps {
+                    data[base + component] = value[component].round().clamp(0.0, 65535.0) as u16;
+                }
+            }
+        }
+        Some(data)
+    }
+
+    fn filtered_tile(&self, dw: u32, dh: u32, tx: u32, ty: u32, empty: &[u16], policy: ResamplePolicy) -> Option<Vec<u16>> {
         let comps = self.comps;
         let x_taps: Vec<_> = (tx * TILE..((tx + 1) * TILE).min(dw)).map(|x| axis_taps(x, self.width, dw, policy)).collect();
         let y_taps: Vec<_> = (ty * TILE..((ty + 1) * TILE).min(dh)).map(|y| axis_taps(y, self.height, dh, policy)).collect();
