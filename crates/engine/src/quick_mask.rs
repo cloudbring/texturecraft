@@ -8,7 +8,7 @@ use rayon::prelude::*;
 use serde_json::{Value, json};
 use texturecraft_core::Channel;
 use texturecraft_paint::{CommitSource, commit_coverage};
-use texturecraft_texel::{TileImage, from_u16, srgb_lut};
+use texturecraft_texel::{ResamplePolicy, TileImage, from_u16, srgb_lut};
 
 use crate::commands::{CommandSpec, always, boolp};
 use crate::{Result, Session, cmd};
@@ -80,7 +80,7 @@ impl Session {
     fn quick_mask_image(&self, ts: usize, (w, h): (u32, u32)) -> TileImage {
         match self.quick_mask.masks.get(&ts) {
             Some(m) if (m.width(), m.height()) == (w, h) => m.clone(),
-            Some(m) => m.resampled(w, h, &[0]),
+            Some(m) => m.resampled_with(w, h, &[0], ResamplePolicy::Coverage),
             None => TileImage::new(w, h, 1),
         }
     }

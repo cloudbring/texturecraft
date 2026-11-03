@@ -13,7 +13,7 @@ pub mod tile;
 
 pub use colorspace::ColorSpace;
 pub use dilate::DilationMap;
-pub use tile::{TILE, TILE_AREA, TileData, TileImage, from_u16, from_u16_signed, to_u16, to_u16_signed};
+pub use tile::{ResamplePolicy, TILE, TILE_AREA, TileData, TileImage, from_u16, from_u16_signed, to_u16, to_u16_signed};
 
 /// Linear → sRGB transfer (0..1).
 #[inline]

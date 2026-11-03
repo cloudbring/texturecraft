@@ -58,7 +58,7 @@ pub(crate) fn preserve_strokes(old: &Session, next: &mut Session) -> usize {
             table.get(&(xi / TILE, yi / TILE)).and_then(|t| t.get(((yi % TILE) * TILE + xi % TILE) as usize)).filter(|p| p[0].is_finite()).map(|p| (p[0], p[1]))
         };
         let tiles = nc.covered_tiles.clone();
-        crate::layer_ops::map_set_images(&mut next.doc, ts, |img, empty| crate::uv_tile_cmds::remap_image(img, (w, h), empty, &map, &tiles, false));
+        crate::layer_ops::map_set_images(&mut next.doc, ts, |img, empty, _| crate::uv_tile_cmds::remap_image(img, (w, h), empty, &map, &tiles, false));
     }
     found
 }

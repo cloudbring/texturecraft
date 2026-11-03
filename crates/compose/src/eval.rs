@@ -774,7 +774,7 @@ fn previews(inp: &Inputs, target: PaintTarget) -> bool {
 }
 
 /// Tile (tx, ty) of painted pixels `img` (of `channel`, or a mask when None) at the size of the
-/// set being composited: as stored, or resampled (bilinear, premultiplied) when the pixels
+/// set being composited: as stored, or scale-aware resampled (premultiplied) when the pixels
 /// belong to a layer instanced from a set of another resolution.
 fn tile_of<'a>(inp: &Inputs, img: Option<&'a TileImage>, tx: u32, ty: u32, channel: Option<Channel>) -> Option<Cow<'a, [u16]>> {
     let img = img?;
@@ -787,7 +787,12 @@ fn tile_of<'a>(inp: &Inputs, img: Option<&'a TileImage>, tx: u32, ty: u32, chann
         Some(c) if c.kind() == ChannelKind::Signed => [vec![to_u16_signed(0.0); c.components()], vec![0]].concat(),
         _ => Vec::new(),
     };
-    img.resampled_tile(w, h, tx, ty, &empty).map(Cow::Owned)
+    let policy = match channel {
+        Some(c) if c.kind() == ChannelKind::NormalMap => texturecraft_texel::ResamplePolicy::Normal,
+        Some(_) => texturecraft_texel::ResamplePolicy::Color,
+        None => texturecraft_texel::ResamplePolicy::Coverage,
+    };
+    img.resampled_tile_with(w, h, tx, ty, &empty, policy).map(Cow::Owned)
 }
 
 fn mask_plan<'a>(inp: &Inputs<'a>, id: LayerId, mask: &'a Mask, tx: u32, ty: u32, fields: Option<&'a Fields>) -> Option<MaskPlan<'a>> {

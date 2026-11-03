@@ -130,7 +130,7 @@ pub(crate) fn relayout(doc: &mut Document, ts: usize, old: &TextureSet, log: &mu
     let tiles: Vec<(u32, u32)> = (0..all.tiles_y()).flat_map(|ty| (0..all.tiles_x()).map(move |tx| (tx, ty))).collect();
     // Blocks and tiles are multiples of 64 texels (resolutions are powers of two ≥ 128), so the
     // map is affine (or None) over each destination tile.
-    crate::layer_ops::map_set_images(doc, ts, |img, empty| remap_image(img, (nw, nh), empty, &texel, &tiles, true));
+    crate::layer_ops::map_set_images(doc, ts, |img, empty, _| remap_image(img, (nw, nh), empty, &texel, &tiles, true));
     if let Some(baked) = doc.baked.get(&ts) {
         match remap_baked(baked, old, &new, &map) {
             Some(b) => {

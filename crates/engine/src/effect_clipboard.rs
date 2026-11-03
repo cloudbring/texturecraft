@@ -107,11 +107,11 @@ fn paste(s: &mut Session, p: &Value) -> Result<Value> {
         list.insert(at, texturecraft_core::Effect { id: new, ..effect.clone() });
         // Painted pixels come along, resampled to the set's size (a mask's paint stays a mask's).
         if let Some(img) = src.pixels.masks.get(&eid).filter(|_| !content) {
-            s.doc.pixels.masks.insert(new, fit(img, size, &[0, 0]));
+            s.doc.pixels.masks.insert(new, fit(img, size, &[0, 0], None));
         }
         for c in channels.iter().copied().filter(|_| content) {
             if let Some(img) = src.pixels.layer(eid, c) {
-                s.doc.pixels.layers.insert((new, c), fit(img, size, &empty_texel(c)));
+                s.doc.pixels.layers.insert((new, c), fit(img, size, &empty_texel(c), Some(c)));
             }
         }
         // The target belongs to the active set's selection: a paste into another set leaves it.

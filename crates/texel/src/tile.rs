@@ -10,6 +10,81 @@ pub const TILE_AREA: usize = (TILE * TILE) as usize;
 /// A tile's texel data: `TILE_AREA × comps` interleaved components.
 pub type TileData = Arc<Vec<u16>>;
 
+/// Interpretation of texels when resizing. Coverage is stored in the last component.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ResamplePolicy {
+    /// Independent continuous components (including one-component coverage masks).
+    Continuous,
+    /// Image values with coverage: Lanczos for fractional reductions, premultiplied filtering.
+    Color,
+    /// Continuous mask and coverage: nonnegative area/triangle weights, premultiplied filtering.
+    Coverage,
+    /// Premultiplied normal XYZ and coverage; normalize after filtering (Lanczos when shrinking).
+    Normal,
+    /// Categorical IDs or binary labels: never invent intermediate values.
+    Nearest,
+}
+
+struct AxisTaps {
+    first: u32,
+    weights: Vec<f64>,
+}
+
+fn axis_taps(index: u32, source: u32, destination: u32, policy: ResamplePolicy) -> AxisTaps {
+    let ratio = source as f64 / destination as f64;
+    let center = (index as f64 + 0.5) * ratio - 0.5;
+    if policy == ResamplePolicy::Nearest {
+        return AxisTaps { first: (center + 0.5).floor().clamp(0.0, (source - 1) as f64) as u32, weights: vec![1.0] };
+    }
+    let integer = source.is_multiple_of(destination) && source / destination >= 2;
+    let triangle = policy == ResamplePolicy::Coverage;
+    let radius = if integer {
+        ratio / 2.0
+    } else if ratio > 1.0 {
+        if triangle { ratio } else { 3.0 * ratio }
+    } else {
+        1.0
+    };
+    let mut start = (center - radius).floor().max(0.0) as u32;
+    let end = (center + radius).ceil().min((source - 1) as f64) as u32;
+    let mut weights = Vec::with_capacity((end - start + 1) as usize);
+    for sample in start..=end {
+        let distance = (sample as f64 - center).abs();
+        let weight = if integer {
+            (ratio / 2.0 - distance + 0.5).clamp(0.0, 1.0)
+        } else if ratio > 1.0 && triangle {
+            (1.0 - distance / ratio).max(0.0)
+        } else if ratio > 1.0 {
+            let phase = distance / ratio;
+            if phase >= 3.0 {
+                0.0
+            } else if phase < 1e-12 {
+                1.0
+            } else {
+                let angle = std::f64::consts::PI * phase;
+                3.0 * angle.sin() * (angle / 3.0).sin() / (angle * angle)
+            }
+        } else {
+            (1.0 - distance).max(0.0)
+        };
+        weights.push(weight);
+    }
+    while weights.len() > 1 && weights.first() == Some(&0.0) {
+        weights.remove(0);
+        start += 1;
+    }
+    while weights.len() > 1 && weights.last() == Some(&0.0) {
+        weights.pop();
+    }
+    let sum: f64 = weights.iter().sum();
+    if sum.abs() > 1e-12 {
+        for weight in &mut weights {
+            *weight /= sum;
+        }
+    }
+    AxisTaps { first: start, weights }
+}
+
 /// An image split into 64×64 tiles; unallocated tiles read as zero. Cloning shares every tile,
 /// so snapshots for undo cost one `Arc` clone per allocated tile.
 #[derive(Clone, Debug, PartialEq)]
@@ -225,20 +300,139 @@ mod tests {
         }
         assert_eq!(to_u16(f32::NAN), 0);
     }
+
+    #[test]
+    fn checkerboard_integer_reductions_average_all_source_texels() {
+        for ratio in [2, 4, 8] {
+            let mut image = TileImage::new(64, 64, 1);
+            for y in 0..64 {
+                for x in 0..64 {
+                    image.set(x, y, &[if x % ratio == 0 && y % ratio == 0 { 65472 } else { 0 }]);
+                }
+            }
+            let reduced = image.resampled(64 / ratio, 64 / ratio, &[0]);
+            assert_eq!(reduced.get(0, 0)[0], 65472 / (ratio * ratio) as u16, "ratio {ratio}");
+        }
+    }
+
+    #[test]
+    fn constant_and_sparse_defaults_are_preserved() {
+        let mut image = TileImage::new(143, 145, 2);
+        for y in 0..145 {
+            for x in 0..143 {
+                image.set(x, y, &[12345, 23456]);
+            }
+        }
+        for (width, height) in [(71, 69), (16, 18), (286, 290)] {
+            let reduced = image.resampled_with(width, height, &[0, 0], ResamplePolicy::Continuous);
+            for y in 0..height {
+                for x in 0..width {
+                    assert_eq!(&reduced.get(x, y)[..2], &[12345, 23456]);
+                }
+            }
+        }
+        let mut sparse = TileImage::new(256, 256, 1);
+        sparse.set(0, 0, &[100]);
+        assert!(!sparse.resampled(128, 128, &[42]).is_allocated(1, 1));
+    }
+
+    #[test]
+    fn fractional_impulse_has_scaled_footprint() {
+        let mut image = TileImage::new(60, 1, 1);
+        image.set(28, 0, &[60000]);
+        let reduced = image.resampled_with(23, 1, &[0], ResamplePolicy::Continuous);
+        let values: Vec<_> = (0..23).map(|x| reduced.get(x, 0)[0]).collect();
+        assert!(values.iter().filter(|value| **value > 0).count() >= 2, "{values:?}");
+        assert!(values[10] > 0 && values[11] > 0, "{values:?}");
+    }
+
+    #[test]
+    fn coverage_is_premultiplied_and_masks_keep_their_kind() {
+        let mut image = TileImage::new(2, 1, 4);
+        image.set(0, 0, &[65535, 0, 0, 32768]);
+        image.set(1, 0, &[0, 0, 0, 0]);
+        assert_eq!(image.resampled_with(1, 1, &[], ResamplePolicy::Color).get(0, 0), [65535, 0, 0, 16384]);
+
+        let mut mask = TileImage::new(8, 1, 1);
+        mask.set(0, 0, &[65535]);
+        mask.set(1, 0, &[65535]);
+        let categorical = mask.resampled_with(3, 1, &[], ResamplePolicy::Nearest);
+        assert_eq!(categorical.get(0, 0)[0], 65535);
+        assert!((0..3).all(|x| [0, 65535].contains(&categorical.get(x, 0)[0])));
+        let coverage = mask.resampled_with(3, 1, &[], ResamplePolicy::Coverage);
+        assert!((0..3).any(|x| (1..65535).contains(&coverage.get(x, 0)[0])));
+        for x in 0..3 {
+            let taps = axis_taps(x, 8, 3, ResamplePolicy::Coverage);
+            assert!(taps.weights.iter().all(|weight| *weight >= 0.0));
+            assert!((taps.weights.iter().sum::<f64>() - 1.0).abs() < 1e-12);
+        }
+    }
+
+    #[test]
+    fn normals_are_renormalized_and_tile_results_match_whole_image() {
+        let mut image = TileImage::new(260, 130, 4);
+        for y in 0..130 {
+            for x in 0..260 {
+                let normal = if x % 2 == 0 { [65535, 32768, 32768, 65535] } else { [32768, 65535, 32768, 65535] };
+                image.set(x, y, &normal);
+            }
+        }
+        let reduced = image.resampled_with(139, 70, &[32768, 32768, 65535, 0], ResamplePolicy::Normal);
+        for y in 0..70 {
+            for x in 0..139 {
+                let pixel = reduced.get(x, y);
+                let length = pixel[..3].iter().map(|part| (f64::from(*part) / 32767.5 - 1.0).powi(2)).sum::<f64>().sqrt();
+                assert!((length - 1.0).abs() < 0.0001, "{pixel:?}: {length}");
+            }
+        }
+        for ty in 0..reduced.tiles_y() {
+            for tx in 0..reduced.tiles_x() {
+                let separate = image.resampled_tile_with(139, 70, tx, ty, &[], ResamplePolicy::Normal);
+                assert_eq!(separate.as_deref(), reduced.tile(tx, ty));
+            }
+        }
+        let mut rgb = TileImage::new(2, 1, 3);
+        rgb.set(0, 0, &[65535, 32768, 32768]);
+        rgb.set(1, 0, &[32768, 65535, 32768]);
+        let pixel = rgb.resampled_with(1, 1, &[], ResamplePolicy::Normal).get(0, 0);
+        assert!((pixel[0] as i32 - pixel[1] as i32).abs() <= 1);
+        assert!(pixel[0] > 45000 && pixel[2] < 33000);
+    }
+
+    #[test]
+    #[ignore = "manual 8192² -> 1024² timing"]
+    fn benchmark_large_reduction() {
+        let mut image = TileImage::new(8192, 8192, 1);
+        for y in 0..image.tiles_y() {
+            for x in 0..image.tiles_x() {
+                let tile = image.tile_mut(x, y, &[]).unwrap();
+                tile.fill(32768);
+            }
+        }
+        let start = std::time::Instant::now();
+        let result = image.resampled(1024, 1024, &[0]);
+        println!("8192² -> 1024²: {:.1} ms; sample {}", start.elapsed().as_secs_f64() * 1000.0, result.get(0, 0)[0]);
+    }
 }
 
 impl TileImage {
-    /// A bilinear resample to `width × height` (same component count). Unallocated source
+    /// A scale-aware resample to `width × height` (same component count). Unallocated source
     /// texels read as `empty` (one value per component); destination tiles whose source
     /// footprint is entirely unallocated stay unallocated.
     pub fn resampled(&self, width: u32, height: u32, empty: &[u16]) -> TileImage {
+        let policy = if self.comps > 1 { ResamplePolicy::Color } else { ResamplePolicy::Continuous };
+        self.resampled_with(width, height, empty, policy)
+    }
+
+    /// Resize using an explicit interpretation of coverage, normals or categorical IDs.
+    pub fn resampled_with(&self, width: u32, height: u32, empty: &[u16], policy: ResamplePolicy) -> TileImage {
         let mut out = TileImage::new(width, height, self.comps);
         if self.allocated_count() == 0 {
             return out;
         }
         for ty in 0..out.tiles_y {
             for tx in 0..out.tiles_x {
-                if let Some(data) = self.resampled_tile(width, height, tx, ty, empty) {
+                if let Some(data) = self.resampled_tile_with(width, height, tx, ty, empty, policy) {
                     out.set_tile(tx, ty, Some(Arc::new(data)));
                 }
             }
@@ -249,34 +443,81 @@ impl TileImage {
     /// Tile (tx, ty) of [`TileImage::resampled`] alone (None when its source footprint is
     /// entirely unallocated).
     pub fn resampled_tile(&self, width: u32, height: u32, tx: u32, ty: u32, empty: &[u16]) -> Option<Vec<u16>> {
-        let (sw, sh) = (self.width as f32, self.height as f32);
+        let policy = if self.comps > 1 { ResamplePolicy::Color } else { ResamplePolicy::Continuous };
+        self.resampled_tile_with(width, height, tx, ty, empty, policy)
+    }
+
+    /// Independently resample one destination tile, using the global image coordinates and
+    /// complete source footprint so tile boundaries match a whole-image reduction.
+    pub fn resampled_tile_with(&self, width: u32, height: u32, tx: u32, ty: u32, empty: &[u16], policy: ResamplePolicy) -> Option<Vec<u16>> {
         let (dw, dh) = (width.max(1), height.max(1));
+        if tx >= dw.div_ceil(TILE) || ty >= dh.div_ceil(TILE) || self.allocated_count() == 0 {
+            return None;
+        }
         let comps = self.comps;
-        // Skip destination tiles whose source footprint has no allocated tile.
-        let (x0, y0) = ((tx * TILE) as f32 * sw / dw as f32, (ty * TILE) as f32 * sh / dh as f32);
-        let (x1, y1) = (((tx + 1) * TILE) as f32 * sw / dw as f32, ((ty + 1) * TILE) as f32 * sh / dh as f32);
-        let any = ((y0 as u32).saturating_sub(1) / TILE..=((y1 as u32 + 1) / TILE).min(self.tiles_y.saturating_sub(1))).any(|sy| {
-            ((x0 as u32).saturating_sub(1) / TILE..=((x1 as u32 + 1) / TILE).min(self.tiles_x.saturating_sub(1))).any(|sx| self.is_allocated(sx, sy))
-        });
-        if !any || self.width == 0 || self.height == 0 {
+        let x_taps: Vec<_> = (tx * TILE..((tx + 1) * TILE).min(dw)).map(|x| axis_taps(x, self.width, dw, policy)).collect();
+        let y_taps: Vec<_> = (ty * TILE..((ty + 1) * TILE).min(dh)).map(|y| axis_taps(y, self.height, dh, policy)).collect();
+        let x_start = x_taps.first()?.first;
+        let x_end = x_taps.last().map(|tap| tap.first + tap.weights.len() as u32 - 1)?;
+        let y_start = y_taps.first()?.first;
+        let y_end = y_taps.last().map(|tap| tap.first + tap.weights.len() as u32 - 1)?;
+        let any = (y_start / TILE..=y_end / TILE).any(|sy| (x_start / TILE..=x_end / TILE).any(|sx| self.is_allocated(sx, sy)));
+        if !any {
             return None;
         }
         let mut data = vec![0u16; TILE_AREA * comps];
-        for ly in 0..TILE {
-            let y = ty * TILE + ly;
-            if y >= dh {
-                break;
-            }
-            let fy = (y as f32 + 0.5) * sh / dh as f32;
-            for lx in 0..TILE {
-                let x = tx * TILE + lx;
-                if x >= dw {
-                    break;
+        let coverage = matches!(policy, ResamplePolicy::Color | ResamplePolicy::Coverage | ResamplePolicy::Normal) && (comps == 2 || comps == 4);
+        let mut rows = vec![[0.0f64; 4]; (y_end - y_start + 1) as usize * x_taps.len()];
+        for sy in y_start..=y_end {
+            for (lx, taps) in x_taps.iter().enumerate() {
+                let result = &mut rows[(sy - y_start) as usize * x_taps.len() + lx];
+                for (offset, weight) in taps.weights.iter().enumerate() {
+                    if *weight == 0.0 {
+                        continue;
+                    }
+                    let sx = taps.first + offset as u32;
+                    let pixel = if self.is_allocated(sx / TILE, sy / TILE) {
+                        self.get(sx, sy)
+                    } else {
+                        let mut value = [0; 4];
+                        for (component, input) in value.iter_mut().zip(empty) {
+                            *component = *input;
+                        }
+                        value
+                    };
+                    let alpha = if coverage { pixel[comps - 1] as f64 / 65535.0 } else { 1.0 };
+                    for component in 0..comps {
+                        result[component] += pixel[component] as f64 * weight * if coverage && component != comps - 1 { alpha } else { 1.0 };
+                    }
                 }
-                let fx = (x as f32 + 0.5) * sw / dw as f32;
-                let o = ((ly * TILE + lx) as usize) * comps;
-                if let Some(out) = data.get_mut(o..o + comps) {
-                    self.bilinear(fx, fy, empty, out);
+            }
+        }
+        for (ly, taps) in y_taps.iter().enumerate() {
+            for lx in 0..x_taps.len() {
+                let mut value = [0.0f64; 4];
+                for (offset, weight) in taps.weights.iter().enumerate() {
+                    let row = &rows[(taps.first + offset as u32 - y_start) as usize * x_taps.len() + lx];
+                    for component in 0..comps {
+                        value[component] += row[component] * weight;
+                    }
+                }
+                if coverage {
+                    let alpha = value[comps - 1].clamp(0.0, 65535.0) / 65535.0;
+                    for component in 0..comps - 1 {
+                        value[component] = if alpha > 1e-12 { value[component] / alpha } else { 0.0 };
+                    }
+                }
+                if policy == ResamplePolicy::Normal && comps >= 3 && (!coverage || value[comps - 1] > 0.0) {
+                    let vector = [value[0], value[1], value[2]].map(|part| part / 32767.5 - 1.0);
+                    let length = vector.iter().map(|part| part * part).sum::<f64>().sqrt();
+                    let normal = if length > 1e-12 { vector.map(|part| part / length) } else { [0.0, 0.0, 1.0] };
+                    for component in 0..3 {
+                        value[component] = (normal[component] + 1.0) * 32767.5;
+                    }
+                }
+                let base = (ly * TILE as usize + lx) * comps;
+                for component in 0..comps {
+                    data[base + component] = value[component].round().clamp(0.0, 65535.0) as u16;
                 }
             }
         }

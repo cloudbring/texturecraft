@@ -3,7 +3,7 @@
 
 use serde_json::{Value, json};
 use texturecraft_core::{Channel, ChannelKind, LayerId, LayerKind};
-use texturecraft_texel::TileImage;
+use texturecraft_texel::{ResamplePolicy, TileImage};
 
 use crate::commands::{CommandSpec, boolp, has_layer, layer_param};
 use crate::session::{Document, StackTarget};
@@ -51,8 +51,13 @@ pub(crate) fn empty_texel(c: Channel) -> Vec<u16> {
     v
 }
 
-pub(crate) fn fit(img: &TileImage, (w, h): (u32, u32), empty: &[u16]) -> TileImage {
-    if (img.width(), img.height()) == (w, h) { img.clone() } else { img.resampled(w, h, empty) }
+pub(crate) fn fit(img: &TileImage, (w, h): (u32, u32), empty: &[u16], channel: Option<Channel>) -> TileImage {
+    let policy = match channel {
+        Some(c) if c.kind() == ChannelKind::NormalMap => ResamplePolicy::Normal,
+        Some(_) => ResamplePolicy::Color,
+        None => ResamplePolicy::Coverage,
+    };
+    if (img.width(), img.height()) == (w, h) { img.clone() } else { img.resampled_with(w, h, empty, policy) }
 }
 
 /// Copy layer `id` of document `src` (recursively, with pixels) into the session's texture set
@@ -75,12 +80,12 @@ pub(crate) fn copy_tree(src: &Document, id: LayerId, s: &mut Document, ts: usize
         let old = e.id;
         e.id = s.project.alloc_id();
         if let Some(img) = src.pixels.masks.get(&old) {
-            s.pixels.masks.insert(e.id, fit(img, size, &[0, 0]));
+            s.pixels.masks.insert(e.id, fit(img, size, &[0, 0], None));
         }
         // Content paint effects keep per-channel pixels.
         for c in channels.iter().copied() {
             if let Some(img) = src.pixels.layer(old, c) {
-                s.pixels.layers.insert((e.id, c), fit(img, size, &empty_texel(c)));
+                s.pixels.layers.insert((e.id, c), fit(img, size, &empty_texel(c), Some(c)));
             }
         }
     }
@@ -92,7 +97,7 @@ pub(crate) fn copy_tree(src: &Document, id: LayerId, s: &mut Document, ts: usize
         if let Some(img) = src.pixels.layer(id, c)
             && channels.contains(&c)
         {
-            s.pixels.layers.insert((new, c), fit(img, size, &empty_texel(c)));
+            s.pixels.layers.insert((new, c), fit(img, size, &empty_texel(c), Some(c)));
         }
     }
     s.project.insert_layer(ts, copy, above, inside)?;
@@ -205,12 +210,12 @@ impl Session {
 
 /// Resample every painted image of texture set `ts` to `size` (after a size change).
 pub(crate) fn resample_set(doc: &mut Document, ts: usize, size: (u32, u32)) {
-    map_set_images(doc, ts, |img, empty| fit(img, size, empty));
+    map_set_images(doc, ts, |img, empty, channel| fit(img, size, empty, channel));
 }
 
 /// Replace every painted image of texture set `ts` (layers, content and mask paint effects) by
-/// `f(image, empty texel)`.
-pub(crate) fn map_set_images(doc: &mut Document, ts: usize, f: impl Fn(&TileImage, &[u16]) -> TileImage) {
+/// `f(image, empty texel, channel)` (None for a continuous mask).
+pub(crate) fn map_set_images(doc: &mut Document, ts: usize, f: impl Fn(&TileImage, &[u16], Option<Channel>) -> TileImage) {
     let ids: Vec<LayerId> = doc.project.walk(ts).into_iter().map(|(id, _)| id).collect();
     let effect_ids: Vec<LayerId> = ids
         .iter()
@@ -219,12 +224,12 @@ pub(crate) fn map_set_images(doc: &mut Document, ts: usize, f: impl Fn(&TileImag
         .collect();
     for ((id, c), img) in doc.pixels.layers.iter_mut() {
         if ids.contains(id) || effect_ids.contains(id) {
-            *img = f(img, &empty_texel(*c));
+            *img = f(img, &empty_texel(*c), Some(*c));
         }
     }
     for (id, img) in doc.pixels.masks.iter_mut() {
         if effect_ids.contains(id) {
-            *img = f(img, &[0, 0]);
+            *img = f(img, &[0, 0], None);
         }
     }
 }
