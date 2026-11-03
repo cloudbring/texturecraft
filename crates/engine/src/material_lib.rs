@@ -146,8 +146,7 @@ fn save(s: &mut Session, p: &Value) -> Result<Value> {
     if let Some(dir) = std::path::Path::new(&path).parent().filter(|d| !d.as_os_str().is_empty()) {
         std::fs::create_dir_all(dir).map_err(|e| bad("material.save", format!("cannot create {}: {e}", dir.display())))?;
     }
-    let tmp = format!("{path}.tmp");
-    std::fs::write(&tmp, bytes).and_then(|_| std::fs::rename(&tmp, &path)).map_err(|e| bad("material.save", format!("cannot write {path}: {e}")))?;
+    texturecraft_formats::write_atomic(std::path::Path::new(&path), &bytes).map_err(|e| bad("material.save", format!("cannot write {path}: {e}")))?;
     Ok(json!({ "path": path }))
 }
 

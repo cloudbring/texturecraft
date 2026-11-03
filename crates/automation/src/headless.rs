@@ -103,13 +103,7 @@ impl Headless {
         match &self.fs {
             Filesystem::Denied => Err(bad("file access is not granted: start the server with --write-root <dir>")),
             Filesystem::TrustedLocal => {
-                // Atomic: a crash or full disk never leaves a half-written project.
-                let tmp = format!("{path}.tmp");
-                let res = std::fs::write(&tmp, bytes).and_then(|()| std::fs::rename(&tmp, path));
-                if res.is_err() {
-                    let _ = std::fs::remove_file(&tmp);
-                }
-                res.map_err(|e| AutomationError::Io(format!("cannot write {path}: {e}")))
+                texturecraft_formats::write_atomic(std::path::Path::new(path), bytes).map_err(|e| AutomationError::Io(format!("cannot write {path}: {e}")))
             }
             Filesystem::Workspace(w) => w.write(path, bytes),
         }

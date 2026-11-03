@@ -9,6 +9,7 @@ license.workspace = true
 workspace = true
 
 [dependencies]
+craft-atomic = { workspace = true }
 texturecraft-engine = { workspace = true }
 texturecraft-render = { workspace = true }
 texturecraft-formats = { workspace = true }

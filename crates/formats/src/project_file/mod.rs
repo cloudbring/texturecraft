@@ -93,23 +93,22 @@ pub fn save_project_bytes(pf: &ProjectFile) -> Result<Vec<u8>> {
     Ok(out.into_inner())
 }
 
-/// Save atomically: `<path>.tmp` first, then rename over `path`.
+/// Save atomically using a streamed, durable staging file.
 #[cfg(not(target_arch = "wasm32"))]
 pub fn save_project(path: &std::path::Path, pf: &ProjectFile) -> Result<()> {
-    let mut tmp = path.as_os_str().to_owned();
-    tmp.push(".tmp");
-    let tmp = std::path::PathBuf::from(tmp);
-    let res = (|| -> Result<()> {
-        let mut file = std::io::BufWriter::new(std::fs::File::create(&tmp)?);
-        write_project(&mut file, pf)?;
-        file.into_inner().map_err(|e| e.into_error())?.sync_all()?;
-        std::fs::rename(&tmp, path)?;
-        Ok(())
-    })();
-    if res.is_err() {
-        let _ = std::fs::remove_file(&tmp);
+    let mut format_error = None;
+    let result = craft_atomic::atomic_write_with(path, |file| {
+        let mut writer = std::io::BufWriter::new(file);
+        if let Err(error) = write_project(&mut writer, pf) {
+            format_error = Some(error);
+            return Err(std::io::Error::other("project serialization failed"));
+        }
+        writer.flush()
+    });
+    if let Some(error) = format_error {
+        return Err(error);
     }
-    res
+    Ok(result?)
 }
 
 fn zip_err(e: zip::result::ZipError) -> FormatError {
