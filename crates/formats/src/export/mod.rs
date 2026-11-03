@@ -20,7 +20,7 @@ use serde::{Deserialize, Serialize};
 use texturecraft_compose::{BakedMaps, Composite};
 use texturecraft_core::{AoMixing, BakedMap, BlockScales, Channel, ChannelKind, NormalFormat, NormalMixing, Project, TextureSet};
 use texturecraft_geom::glam::Vec3;
-use texturecraft_texel::{ColorSpace, DilationMap, linear_to_srgb};
+use texturecraft_texel::{ColorSpace, DilationMap, PaddingMetric, linear_to_srgb};
 
 use crate::{FormatError, MAX_IMAGE_SIZE, Result};
 
@@ -316,6 +316,9 @@ pub struct ExportOptions {
     pub format_override: Option<FileFormat>,
     pub bit_depth_override: Option<u8>,
     pub padding: Padding,
+    /// Distance used for selecting padding sources and limiting dilation.
+    #[serde(default)]
+    pub padding_metric: PaddingMetric,
     /// Output size (power of two); None keeps the texture set resolution.
     pub size: Option<u32>,
     /// Normal convention for every normal output instead of the project's / preset's.
@@ -343,6 +346,7 @@ impl ExportOptions {
             format_override: None,
             bit_depth_override: None,
             padding: Padding::Infinite,
+            padding_metric: PaddingMetric::Euclidean,
             size: None,
             normal_format: None,
             atlas: false,
@@ -698,8 +702,10 @@ pub fn render_maps(input: &ExportInput, opts: &ExportOptions) -> Result<Vec<Expo
     // Padding stays inside each UV tile.
     let dmap = match opts.padding {
         Padding::None => None,
-        Padding::Dilation(d) | Padding::DilationDefault(d) => Some(DilationMap::in_blocks(input.coverage, res, height, Some(d), tile_res)),
-        Padding::Infinite => Some(DilationMap::in_blocks(input.coverage, res, height, None, tile_res)),
+        Padding::Dilation(d) | Padding::DilationDefault(d) => {
+            Some(DilationMap::in_blocks_with_metric(input.coverage, res, height, Some(d), tile_res, opts.padding_metric))
+        }
+        Padding::Infinite => Some(DilationMap::in_blocks_with_metric(input.coverage, res, height, None, tile_res, opts.padding_metric)),
     };
     let beyond_default = matches!(opts.padding, Padding::DilationDefault(_) | Padding::Infinite);
     let sampler = Sampler {

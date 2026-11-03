@@ -3985,6 +3985,9 @@ dependencies = [
 [[package]]
 name = "texturecraft-texel"
 version = "0.3.0"
+dependencies = [
+ "serde",
+]
 
 [[package]]
 name = "texturecraft-ui-egui"

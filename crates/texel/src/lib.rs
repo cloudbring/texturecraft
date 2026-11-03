@@ -2,7 +2,7 @@
 //!
 //! Texel storage and texel-space helpers: sparse copy-on-write [`TileImage`]s (64×64 tiles of
 //! `u16` components), UV padding ([`DilationMap`]), deterministic [`noise`], and sRGB transfer
-//! functions. No workspace dependencies.
+//! functions.
 #![forbid(unsafe_code)]
 #![deny(clippy::unwrap_used, clippy::expect_used, clippy::panic, clippy::unimplemented, clippy::todo, clippy::unreachable)]
 
@@ -12,7 +12,7 @@ pub mod noise;
 pub mod tile;
 
 pub use colorspace::ColorSpace;
-pub use dilate::DilationMap;
+pub use dilate::{DilationMap, PaddingMetric};
 pub use tile::{TILE, TILE_AREA, TileData, TileImage, from_u16, from_u16_signed, to_u16, to_u16_signed};
 
 /// Linear → sRGB transfer (0..1).

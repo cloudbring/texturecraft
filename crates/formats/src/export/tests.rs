@@ -259,6 +259,23 @@ fn padding_modes() {
 }
 
 #[test]
+fn exported_padding_uses_selected_distance_metric() {
+    let mut fx = Fx::new(&[Channel::Roughness]);
+    fx.coverage.fill(false);
+    fx.coverage[(RES + 1) as usize] = true;
+    fx.coverage[(3 * RES + 1) as usize] = true;
+    fx.set(Channel::Roughness, 1, 1, [0.25; 3]);
+    fx.set(Channel::Roughness, 1, 3, [0.75; 3]);
+    let mut opts = ExportOptions::new(builtin_preset("Separate maps").unwrap());
+    assert_eq!(opts.padding_metric, PaddingMetric::Euclidean);
+    let euclidean = decode(find(&fx.render(&opts), "_roughness.png")).to_luma8().get_pixel(3, 3)[0];
+    opts.padding_metric = PaddingMetric::Chebyshev;
+    let chebyshev = decode(find(&fx.render(&opts), "_roughness.png")).to_luma8().get_pixel(3, 3)[0];
+    assert_eq!(euclidean, 191);
+    assert_eq!(chebyshev, 64);
+}
+
+#[test]
 fn output_size_override() {
     let fx = Fx::new(&default_channels());
     for size in [32u32, 128] {

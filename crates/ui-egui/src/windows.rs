@@ -1201,7 +1201,7 @@ fn export_sets(app: &mut TextureCraftApp) -> bool {
 
 pub(crate) fn export_params(app: &TextureCraftApp) -> serde_json::Value {
     let e = &app.ui.export;
-    let mut p = json!({"preset": e.preset, "padding": e.padding, "dilation": e.dilation});
+    let mut p = json!({"preset": e.preset, "padding": e.padding, "paddingMetric": e.padding_metric, "dilation": e.dilation});
     if !e.format.is_empty() {
         p["format"] = json!(e.format);
     }
@@ -1303,6 +1303,14 @@ fn export_settings_tab(app: &mut TextureCraftApp, ui: &mut Ui, presets: &[textur
                 ui.add(egui::DragValue::new(&mut app.ui.export.dilation).range(0..=256).suffix(" px"));
             }
         });
+        ui.end_row();
+        ui.label(tr("Padding distance"));
+        egui::ComboBox::from_id_salt("exp_pad_metric")
+            .selected_text(if app.ui.export.padding_metric == "chebyshev" { tr("Chebyshev (legacy)") } else { tr("Euclidean") })
+            .show_ui(ui, |ui| {
+                ui.selectable_value(&mut app.ui.export.padding_metric, "euclidean".into(), tr("Euclidean"));
+                ui.selectable_value(&mut app.ui.export.padding_metric, "chebyshev".into(), tr("Chebyshev (legacy)"));
+            });
         ui.end_row();
         ui.label(tr("Normal map format"));
         let nf = match app.ui.export.normal_format.as_str() {

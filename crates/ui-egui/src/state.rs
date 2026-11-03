@@ -182,6 +182,9 @@ pub struct ExportUi {
     pub bit_depth: u8,
     /// none | dilation | dilationDefault | infinite
     pub padding: String,
+    /// euclidean | chebyshev
+    #[serde(default = "default_padding_metric")]
+    pub padding_metric: String,
     pub dilation: u32,
     /// Output size override (0 = each texture set's size).
     pub size: u32,
@@ -201,6 +204,10 @@ pub struct ExportUi {
     pub renaming: Option<String>,
 }
 
+fn default_padding_metric() -> String {
+    "euclidean".into()
+}
+
 impl Default for ExportUi {
     fn default() -> Self {
         ExportUi {
@@ -209,6 +216,7 @@ impl Default for ExportUi {
             format: String::new(),
             bit_depth: 0,
             padding: "infinite".into(),
+            padding_metric: default_padding_metric(),
             dilation: 16,
             size: 0,
             normal_format: String::new(),

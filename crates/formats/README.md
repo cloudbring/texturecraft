@@ -86,7 +86,7 @@ pub fn preset_to_json(preset: &ExportPreset) -> Result<String>;
   1 − roughness, `AoMixed` = baked AO × AO channel, `F0` = 0.08 × specular level),
   `Baked { map, component }`, `Constant(f32)`.
 - `ExportOptions { preset, format_override, bit_depth_override, padding, size, normal_format }`;
-  `Padding::{None, Dilation(n), DilationDefault(n), Infinite}`; `size` must be a power of two
+  `Padding::{None, Dilation(n), DilationDefault(n), Infinite}` and `padding_metric` (`Euclidean` by default, `Chebyshev` for legacy padding); `size` must be a power of two
   (box filter down, bilinear up).
 - File templates: `$project`, `$mesh`, `$textureSet`, `$channel`, `$colorSpace`; names are
   sanitized to `[A-Za-z0-9_.-]` (reserved device names get a `_` prefix); case-insensitive
