@@ -9,6 +9,8 @@ license.workspace = true
 workspace = true
 
 [dependencies]
+# TODO(#2): repoint to the upstream craft-libs revision after the blur branch lands.
+craft-blur = { git = "https://github.com/cloudbring/craft-libs", branch = "algo/2-craft-blur-midband" }
 texturecraft-core = { workspace = true }
 texturecraft-texel = { workspace = true }
 texturecraft-geom = { workspace = true }

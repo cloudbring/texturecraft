@@ -529,6 +529,30 @@ fn anchors_inside_a_content_stack_record_the_content_up_to_them() {
 }
 
 #[test]
+fn gaussian_blurs_preserve_coverage_and_tile_grouping() {
+    for radius in [12.0, 64.0, 128.0] {
+        let mut f = fixture();
+        let base = add(&mut f, 0, LayerKind::Paint, None);
+        paint_rect(&mut f, base, (0, 0), (140, 170), 0.8);
+        let content = effect(&mut f, EffectKind::Filter(Filter::Blur { radius }));
+        f.project.layer_mut(base).unwrap().content_effects.push(content);
+        let mut mask = Mask::new(MaskBackground::White);
+        mask.effects.push(effect(&mut f, EffectKind::Filter(Filter::Blur { radius })));
+        f.project.layer_mut(base).unwrap().mask = Some(mask);
+        let expected = reference(&f, 0);
+        assert!((expected.value(Channel::Roughness, 0, 0)[0] - 0.65).abs() < 2e-3);
+        assert!((expected.value(Channel::BaseColor, 0, 0)[0] - 0.65).abs() < 2e-3);
+        let (images, baked) = (Default::default(), Default::default());
+        let mut separate = Composite::new(&f.project.texture_sets[0].channel_list(), RES);
+        for tile in all_tiles(RES, RES) {
+            composite_tiles(&inputs(&f, 0, &images, &baked), &mut separate, &[tile]);
+        }
+        assert!(separate == expected, "radius={radius}: tile grouping changes Gaussian output");
+        check_cached(&f, 0, base);
+    }
+}
+
+#[test]
 fn gathering_filters_composite_identically_in_any_grouping_and_cached() {
     let mut f = fixture();
     let base = add(

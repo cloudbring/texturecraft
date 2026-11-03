@@ -5,6 +5,7 @@
 use std::borrow::Cow;
 use std::collections::{BTreeMap, HashMap};
 
+use craft_blur::{Cancel, Edge, Gaussian, Quality, Scratch, Shape};
 use rayon::prelude::*;
 use texturecraft_core::{
     BakedMap, BlendMode, BlockScales, Channel, ChannelKind, CompareOp, Effect, EffectKind, Fill, Filter, Generator, GeneratorKind, HeightMask, Layer, LayerId,
@@ -245,13 +246,13 @@ pub type Fields = HashMap<FieldKey, Field>;
 /// How a neighbourhood filter reads around a texel.
 #[derive(Clone, Copy)]
 enum Op {
-    /// Box blurs (≈ Gaussian), sharpening by the amount when given.
+    /// Gaussian blur, sharpening by the amount when given.
     Blur(Option<f32>),
-    /// The value minus its box blur, around the channel's mid value.
+    /// The value minus its Gaussian blur, around the channel's mid value.
     HighPass,
-    /// Values ramped down towards their shape's edge, from the box blur.
+    /// Values ramped down towards their shape's edge, from the Gaussian blur.
     Bevel,
-    /// The value plus its box blur times the amount.
+    /// The value plus its Gaussian blur times the amount.
     Glow(f32),
     /// The value at the center of its cell (`r` texels across).
     Mosaic,
@@ -285,7 +286,7 @@ fn neighbourhood(effects: &[Effect], res: u32) -> Option<(usize, f32, Op)> {
             }
             EffectKind::Filter(Filter::HighPass { radius }) => Some((i, texels(*radius), Op::HighPass)),
             EffectKind::Filter(Filter::EdgeDetect { width }) => Some((i, texels(*width), Op::Edge)),
-            // Three box passes ramp an edge over about twice their radius.
+            // The Gaussian ramps an edge over about twice its sigma.
             EffectKind::Filter(Filter::Bevel { width }) => Some((i, texels(*width * 0.5), Op::Bevel)),
             EffectKind::Filter(Filter::Glow { radius, amount }) => Some((i, texels(*radius), Op::Glow(*amount))),
             EffectKind::Filter(Filter::Mosaic { size }) => Some((i, texels(*size), Op::Mosaic)),
@@ -417,61 +418,66 @@ fn gather(op: Op, orig: &[f32], cover: &[f32], comps: usize, (x0, y0, w, h): (u3
     data
 }
 
-/// Fixed-point scale of the blur. Integer running sums make a texel's result independent of
-/// the region it is computed in, so tiles composited in any grouping agree exactly.
-const FIX: f64 = (1u64 << 24) as f64;
-
-/// Three running-sum box blurs (≈ Gaussian) of a `w × h` image along rows then along columns.
-/// Rows (and columns, transposed) blur in parallel.
-fn blur(data: &mut [f32], w: usize, h: usize, r: usize) {
-    let fix = |v: &f32| if v.is_finite() { (f64::from(v.clamp(-1e6, 1e6)) * FIX).round() as i64 } else { 0 };
-    let mut v: Vec<i64> = data.par_iter().map(fix).collect();
-    blur_rows(&mut v, w, r);
-    let mut t = transpose(&v, w, h);
-    blur_rows(&mut t, h, r);
-    data.par_iter_mut().zip(transpose(&t, h, w)).for_each(|(d, s)| *d = (s as f64 / FIX) as f32);
-}
-
-/// Three box blurs of radius `r` along every row (`w` long) of `data`.
-fn blur_rows(data: &mut [i64], w: usize, r: usize) {
-    if w == 0 {
-        return;
+/// Variance-exact Gaussian with zero extension, parallel complete rows and column stripes.
+/// Sigma is the unrounded 2K-relative UI radius converted to texels, including block scale.
+/// A zero border makes Clamp's optimized paths extend the original plane by zero on each axis.
+fn blur(data: &mut [f32], w: usize, h: usize, sigma: f32) -> Result<(), craft_blur::Error> {
+    let shape = Shape::new(w, h, 1)?;
+    if data.len() != shape.samples() {
+        return Err(craft_blur::Error::InvalidDimensions);
     }
-    data.par_chunks_mut(w).for_each(|row| {
-        let mut tmp = vec![0i64; row.len()];
-        for _ in 0..3 {
-            box_line(row, &mut tmp, r);
-            row.copy_from_slice(&tmp);
+    let gaussian = Gaussian::new(sigma, Quality::Recursive)?;
+    if data.is_empty() {
+        return Ok(());
+    }
+    let padded_width = w.checked_add(2).ok_or(craft_blur::Error::SizeOverflow)?;
+    let padded_height = h.checked_add(2).ok_or(craft_blur::Error::SizeOverflow)?;
+    let padded_shape = Shape::new(padded_width, padded_height, 1)?;
+    let mut padded = Vec::new();
+    padded.try_reserve_exact(padded_shape.samples()).map_err(|_| craft_blur::Error::Allocation)?;
+    padded.resize(padded_shape.samples(), 0.0);
+    padded.par_chunks_mut(padded_width).skip(1).zip(data.par_chunks(w)).for_each(|(row, source)| {
+        for (slot, value) in row.iter_mut().skip(1).zip(source) {
+            *slot = if value.is_finite() { value.clamp(-1e6, 1e6) } else { 0.0 };
         }
     });
-}
-
-/// One box blur of radius `r` of a line (texels past the ends count as 0).
-fn box_line(src: &[i64], dst: &mut [i64], r: usize) {
-    let n = (2 * r + 1) as i64;
-    // Rounded division of a window sum.
-    let avg = |acc: i64| (2 * acc + n).div_euclid(2 * n);
-    let mut acc: i64 = src.iter().take(r + 1).sum();
-    for (i, d) in dst.iter_mut().enumerate() {
-        *d = avg(acc);
-        acc += src.get(i + r + 1).copied().unwrap_or(0);
-        if i >= r {
-            acc -= src.get(i - r).copied().unwrap_or(0);
+    if let Some(reach) = gaussian.separable().reach() {
+        return data.par_chunks_mut(w.saturating_mul(256)).enumerate().try_for_each_init(
+            || (Scratch::default(), Vec::new()),
+            |(scratch, band), (index, output)| {
+                let first_output = index * 256 + 1;
+                let first = first_output.saturating_sub(reach);
+                let last = (first_output + output.len() / w + reach).min(padded_height);
+                let source = padded.get(first * padded_width..last * padded_width).ok_or(craft_blur::Error::InvalidDimensions)?;
+                band.clear();
+                band.try_reserve_exact(source.len()).map_err(|_| craft_blur::Error::Allocation)?;
+                band.extend_from_slice(source);
+                gaussian.apply(band, Shape::new(padded_width, last - first, 1)?, Edge::Clamp, scratch, Cancel::Never)?;
+                for (row, source) in output.chunks_mut(w).zip(band.chunks(padded_width).skip(first_output - first)) {
+                    for (slot, value) in row.iter_mut().zip(source.iter().skip(1)) {
+                        *slot = *value;
+                    }
+                }
+                Ok(())
+            },
+        );
+    }
+    padded.par_chunks_mut(padded_width.saturating_mul(craft_blur::LINE_BATCH)).try_for_each_init(Scratch::default, |scratch, rows| {
+        gaussian.filter_rows(rows, Shape::new(padded_width, rows.len() / padded_width, 1)?, Edge::Clamp, scratch, Cancel::Never)
+    })?;
+    let mut stripes: Vec<Vec<&mut [f32]>> = (0..padded_width.div_ceil(64)).map(|_| Vec::with_capacity(padded_height)).collect();
+    for row in padded.chunks_exact_mut(padded_width) {
+        for (stripe, part) in stripes.iter_mut().zip(row.chunks_mut(64)) {
+            stripe.push(part);
         }
     }
-}
-
-/// `src` (`w × h`, row-major) transposed to `h × w`.
-fn transpose(src: &[i64], w: usize, h: usize) -> Vec<i64> {
-    let mut out = vec![0i64; src.len()];
-    if h > 0 {
-        out.par_chunks_mut(h).enumerate().for_each(|(x, col)| {
-            for (y, d) in col.iter_mut().enumerate() {
-                *d = src.get(y * w + x).copied().unwrap_or(0);
-            }
-        });
-    }
-    out
+    stripes.par_iter_mut().try_for_each_init(Scratch::default, |scratch, rows| gaussian.filter_columns(rows, 1, Edge::Clamp, scratch, Cancel::Never))?;
+    data.par_chunks_mut(w).zip(padded.par_chunks(padded_width).skip(1)).for_each(|(row, source)| {
+        for (slot, value) in row.iter_mut().zip(source.iter().skip(1)) {
+            *slot = *value;
+        }
+    });
+    Ok(())
 }
 
 /// Covered texels of tile (tx, ty): (x, y, offset inside the tile).
@@ -540,14 +546,17 @@ fn field(inp: &Inputs, channels: &[Channel], below: &Fields, id: LayerId, job: J
     let opacity = effects.iter().filter(|e| e.visible).nth(k).map(|e| e.opacity.clamp(0.0, 1.0)).unwrap_or(1.0);
     // Clamped: a hostile radius must not overflow the halo and window arithmetic.
     let r = radius.round().clamp(1.0, gw.max(gh) as f32) as u32;
-    // Three box passes reach 3r texels, the other filters r (and a texel for bilinear samples).
+    // Sampled Gaussians need their exact support; recursive Gaussians need complete axes.
     let blurs = matches!(op, Op::Blur(_) | Op::HighPass | Op::Bevel | Op::Glow(_));
-    let reach = if blurs { 3 * r } else { r + 1 };
+    let sigma = radius.clamp(0.5, gw.max(gh).max(1) as f32);
+    let reach = if blurs { Gaussian::new(sigma, Quality::Recursive).ok()?.separable().reach() } else { Some((r + 1) as usize) };
+    let full_axes = reach.is_none();
+    let reach = reach.unwrap_or(0) as u32;
     let halo = reach.div_ceil(TILE);
     let (tx0, ty0) = tiles.iter().fold((u32::MAX, u32::MAX), |(a, b), t| (a.min(t.0), b.min(t.1)));
     let (tx1, ty1) = tiles.iter().fold((0, 0), |(a, b), t| (a.max(t.0), b.max(t.1)));
-    let (rx0, ry0) = (tx0.saturating_sub(halo) * TILE, ty0.saturating_sub(halo) * TILE);
-    let (rx1, ry1) = (((tx1 + 1 + halo) * TILE).min(gw), ((ty1 + 1 + halo) * TILE).min(gh));
+    let (rx0, ry0) = if full_axes { (0, 0) } else { (tx0.saturating_sub(halo) * TILE, ty0.saturating_sub(halo) * TILE) };
+    let (rx1, ry1) = if full_axes { (gw, gh) } else { (((tx1 + 1 + halo) * TILE).min(gw), ((ty1 + 1 + halo) * TILE).min(gh)) };
     let (w, h) = (rx1.saturating_sub(rx0), ry1.saturating_sub(ry0));
     if w == 0 || h == 0 {
         return None;
@@ -620,20 +629,22 @@ fn field(inp: &Inputs, channels: &[Channel], below: &Fields, id: LayerId, job: J
     };
     // The filter at the radius of a tile filling `scale` of its atlas block (a smaller tile has
     // fewer texels per UV unit, so its filters reach fewer texels).
-    let filtered = |scale: f32| -> Vec<f32> {
+    let filtered = |scale: f32| -> Option<Vec<f32>> {
         let res = ((inp.tile_res() as f32 * scale).round() as u32).max(1);
-        let r = neighbourhood(effects, res).map_or(r, |(_, radius, _)| radius.round().clamp(1.0, r as f32) as u32);
+        let radius = neighbourhood(effects, res).map_or(radius, |(_, radius, _)| radius);
         if !blurs {
-            return gather(op, &orig, &cover, comps, (rx0, ry0, w, h), r as f32, res, opacity);
+            let r = radius.round().clamp(1.0, r as f32);
+            return Some(gather(op, &orig, &cover, comps, (rx0, ry0, w, h), r, res, opacity));
         }
         // Weighted so uncovered texels don't bleed in.
-        let (wu, hu, ru) = (w as usize, h as usize, r as usize);
+        let (wu, hu) = (w as usize, h as usize);
+        let sigma = radius.clamp(0.5, sigma);
         let mut weights = cover.clone();
-        blur(&mut weights, wu, hu, ru);
+        blur(&mut weights, wu, hu, sigma).ok()?;
         let mut data = orig.clone();
         for p in 0..comps {
             let mut vals: Vec<f32> = orig.par_chunks(comps).map(|px| px.get(p).copied().unwrap_or(0.0)).collect();
-            blur(&mut vals, wu, hu, ru);
+            blur(&mut vals, wu, hu, sigma).ok()?;
             data.par_chunks_mut(comps).zip(vals.par_iter()).zip(weights.par_iter()).for_each(|((px, v), wt)| {
                 // Content is premultiplied, so the mid value is too (coverage itself is kept).
                 let cov = if comps == 4 { px.get(3).copied().unwrap_or(0.0) } else { 1.0 };
@@ -654,7 +665,7 @@ fn field(inp: &Inputs, channels: &[Channel], below: &Fields, id: LayerId, job: J
                 }
             });
         }
-        data
+        Some(data)
     };
     // Each block keeps the result at its tile's scale (blocks are TILE aligned).
     let scales = inp.project.texture_set(inp.ts).map(TextureSet::block_scales).unwrap_or_default();
@@ -663,9 +674,9 @@ fn field(inp: &Inputs, channels: &[Channel], below: &Fields, id: LayerId, job: J
     levels.sort_by(f32::total_cmp);
     levels.dedup();
     let (first, rest) = levels.split_first().map_or((1.0, &[][..]), |(f, r)| (*f, r));
-    let mut data = filtered(first);
+    let mut data = filtered(first)?;
     for &scale in rest {
-        let other = filtered(scale);
+        let other = filtered(scale)?;
         let row = w as usize * comps;
         data.par_chunks_mut(row).zip(other.par_chunks(row)).enumerate().for_each(|(y, (dst, src))| {
             for (x, (d, s)) in dst.chunks_mut(comps).zip(src.chunks(comps)).enumerate() {
@@ -2046,6 +2057,90 @@ mod tests {
     use super::*;
     use texturecraft_core::{ChannelBlend, Effect, Layer, Procedural, ProceduralKind, TextureSet};
     use texturecraft_geom::primitives;
+
+    #[test]
+    fn blur_impulse_variance() {
+        for sigma in [0.5f32, 0.75, 1.0, 1.25, 2.0, 4.0, 7.99, 8.0, 16.0, 32.0, 64.0, 128.0, 256.0] {
+            let width = ((sigma * 64.0) as usize).max(4096) + 1;
+            let center = width / 2;
+            for (columns, rows) in [(width, 1), (1, width)] {
+                let mut impulse = vec![0.0; width];
+                impulse[center] = 1.0;
+                blur(&mut impulse, columns, rows, sigma).unwrap();
+                let mass: f64 = impulse.iter().map(|value| f64::from(*value)).sum();
+                let centroid = impulse.iter().enumerate().map(|(index, value)| index as f64 * f64::from(*value)).sum::<f64>() / mass;
+                let variance = impulse.iter().enumerate().map(|(index, value)| (index as f64 - centroid).powi(2) * f64::from(*value)).sum::<f64>() / mass;
+                let error = variance / f64::from(sigma).powi(2) - 1.0;
+                eprintln!("blur sigma={sigma}, {columns}×{rows}, variance={variance:.9}, error={:.6}%", error * 100.0);
+                assert!((centroid - center as f64).abs() < 1e-5);
+                assert!(error.abs() <= 0.005, "sigma={sigma}, variance={variance}, error={error}");
+            }
+        }
+    }
+
+    #[test]
+    fn blur_ui_radius_scales_without_integer_rounding() {
+        let effects = [Effect::new(LayerId(1), EffectKind::Filter(Filter::Blur { radius: 3.0 }))];
+        for (resolution, sigma) in [(64, 0.5), (512, 0.75), (1024, 1.5), (2048, 3.0), (4096, 6.0)] {
+            let (_, radius, operation) = neighbourhood(&effects, resolution).unwrap();
+            assert_eq!(radius, sigma);
+            assert!(matches!(operation, Op::Blur(None)));
+        }
+        for radius in [0.0, -1.0, f32::NAN] {
+            assert!(neighbourhood(&[Effect::new(LayerId(1), EffectKind::Filter(Filter::Blur { radius }))], 2048).is_none());
+        }
+    }
+
+    #[test]
+    fn blur_parallel_matches_zero_extended_serial_and_sanitizes() {
+        for (width, height) in [(1, 1), (1, 9), (7, 1), (65, 13), (129, 67), (129, 521)] {
+            for sigma in [0.5, 1.5, 4.0, 8.0, 16.0] {
+                let mut actual: Vec<f32> = (0..width * height).map(|index| (index % 23) as f32 - 4.0).collect();
+                actual[0] = f32::NAN;
+                if actual.len() > 2 {
+                    actual[1] = f32::INFINITY;
+                    actual[2] = -2e6;
+                }
+                let mut expected: Vec<f32> = actual.iter().map(|value| if value.is_finite() { value.clamp(-1e6, 1e6) } else { 0.0 }).collect();
+                Gaussian::new(sigma, Quality::Recursive)
+                    .unwrap()
+                    .apply(&mut expected, Shape::new(width, height, 1).unwrap(), Edge::Zero, &mut Scratch::default(), Cancel::Never)
+                    .unwrap();
+                blur(&mut actual, width, height, sigma).unwrap();
+                for (actual, expected) in actual.iter().zip(&expected) {
+                    assert!((actual - expected).abs() <= 1e-6 * expected.abs().max(1.0), "{width}×{height}, sigma={sigma}: {actual} != {expected}");
+                }
+            }
+        }
+        assert!(blur(&mut [], 0, 9, 1.0).is_ok());
+        let mut invalid = [0.5];
+        assert_eq!(blur(&mut invalid, 2, 1, 1.0), Err(craft_blur::Error::InvalidDimensions));
+        assert_eq!(invalid, [0.5]);
+    }
+
+    #[test]
+    #[ignore]
+    fn bench_mask_blur_4096() {
+        rayon::ThreadPoolBuilder::new().num_threads(4).build().unwrap().install(|| {
+            let size = 4096;
+            let source: Vec<f32> = (0..size * size).map(|index| ((index % size / 32 + index / size / 32) % 2) as f32).collect();
+            for radius in [1.0f32, 4.0, 16.0, 64.0] {
+                let mut times = Vec::new();
+                for iteration in 0..9 {
+                    let mut pixels = source.clone();
+                    let start = std::time::Instant::now();
+                    blur(&mut pixels, size, size, radius).unwrap();
+                    let elapsed = start.elapsed().as_secs_f64() * 1000.0;
+                    std::hint::black_box(&pixels);
+                    if iteration > 1 {
+                        times.push(elapsed);
+                    }
+                }
+                times.sort_by(f64::total_cmp);
+                eprintln!("4096² mask blur, four workers, sigma={radius}: {:.3} ms", times[3]);
+            }
+        });
+    }
 
     struct Fixture {
         project: Project,
