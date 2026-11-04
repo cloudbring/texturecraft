@@ -13,3 +13,7 @@ craft-tiledir = { workspace = true }
 
 [dev-dependencies]
 stats_alloc = { workspace = true }
+proptest = "1"
+# OLD oracle (#188): texturecraft-texel at the merge-base of algo/35-persistent-tile-directory with
+# origin/main, whose TileImage held a Vec<Option<TileData>>.
+texturecraft-texel-old = { git = "https://github.com/storytold/texturecraft", rev = "4edb8b86bc67f58922d6f16a6489059a78b61a3e", package = "texturecraft-texel" }

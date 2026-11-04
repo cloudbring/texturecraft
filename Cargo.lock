@@ -4013,7 +4013,7 @@ dependencies = [
  "rayon",
  "texturecraft-core",
  "texturecraft-geom",
- "texturecraft-texel",
+ "texturecraft-texel 0.3.0",
  "thiserror 2.0.21",
 ]
 
@@ -4037,7 +4037,7 @@ dependencies = [
  "rayon",
  "texturecraft-core",
  "texturecraft-geom",
- "texturecraft-texel",
+ "texturecraft-texel 0.3.0",
 ]
 
 [[package]]
@@ -4065,7 +4065,7 @@ dependencies = [
  "texturecraft-formats",
  "texturecraft-geom",
  "texturecraft-paint",
- "texturecraft-texel",
+ "texturecraft-texel 0.3.0",
  "thiserror 2.0.21",
  "zip",
 ]
@@ -4088,7 +4088,7 @@ dependencies = [
  "texturecraft-compose",
  "texturecraft-core",
  "texturecraft-geom",
- "texturecraft-texel",
+ "texturecraft-texel 0.3.0",
  "thiserror 2.0.21",
  "tobj",
  "zip",
@@ -4117,7 +4117,7 @@ dependencies = [
  "texturecraft-compose",
  "texturecraft-core",
  "texturecraft-geom",
- "texturecraft-texel",
+ "texturecraft-texel 0.3.0",
 ]
 
 [[package]]
@@ -4134,7 +4134,7 @@ dependencies = [
  "texturecraft-compose",
  "texturecraft-core",
  "texturecraft-geom",
- "texturecraft-texel",
+ "texturecraft-texel 0.3.0",
  "wasm-bindgen-futures",
  "wgpu",
 ]
@@ -4144,8 +4144,15 @@ name = "texturecraft-texel"
 version = "0.3.0"
 dependencies = [
  "craft-tiledir",
+ "proptest",
  "stats_alloc",
+ "texturecraft-texel 0.3.0 (git+https://github.com/storytold/texturecraft?rev=4edb8b86bc67f58922d6f16a6489059a78b61a3e)",
 ]
+
+[[package]]
+name = "texturecraft-texel"
+version = "0.3.0"
+source = "git+https://github.com/storytold/texturecraft?rev=4edb8b86bc67f58922d6f16a6489059a78b61a3e#4edb8b86bc67f58922d6f16a6489059a78b61a3e"
 
 [[package]]
 name = "texturecraft-ui-egui"
