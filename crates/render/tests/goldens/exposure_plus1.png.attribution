@@ -1,0 +1,6 @@
+asset:        exposure_plus1.png
+title:        Headless viewport render: exposure_plus1
+author:       TextureCraft contributors
+source:       original work (rendered by TextureCraft's own renderer from procedural content; no external media)
+license:      MIT OR Apache-2.0
+notes:        Golden reference image (1/1 scale, 480x360). Regenerate with TC_BLESS=1.

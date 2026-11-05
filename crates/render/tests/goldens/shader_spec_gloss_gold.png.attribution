@@ -1,0 +1,6 @@
+asset:        shader_spec_gloss_gold.png
+title:        Headless viewport render: shader_spec_gloss_gold
+author:       TextureCraft contributors
+source:       original work (rendered by TextureCraft's own renderer from procedural content; no external media)
+license:      MIT OR Apache-2.0
+notes:        Golden reference image (1/1 scale, 480x360). Regenerate with TC_BLESS=1.

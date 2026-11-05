@@ -1,3 +1,6 @@
+#[path = "common/golden.rs"]
+mod golden;
+
 use texturecraft_compose::{DisplayKind, ImageRes};
 use texturecraft_geom::{OrbitCamera, primitives};
 use texturecraft_render::headless::Headless;
@@ -58,9 +61,28 @@ fn setup() -> Option<(Headless, Frame)> {
     Some((h, frame))
 }
 
+/// Renders checked against `tests/goldens/<name>.png` (bless with `TC_BLESS=1`). They are GPU
+/// output, so they use `Tolerance::RENDER` (hardware and software adapters round some shader
+/// paths differently) and, like every test here, are skipped without a GPU adapter.
+const GOLDENS: &[&str] = &[
+    "headless_ball",
+    "headless_uv",
+    "headless_uv_wire",
+    "exposure_plus1",
+    "channel_base_color",
+    "post_vignette",
+    "shadows_on",
+    "wire3d_on",
+    "env_ortho",
+    "shader_spec_gloss_gold",
+];
+
 fn render(h: &mut Headless, frame: &Frame, name: &str) -> Img {
     let (w, hgt, px) = h.render(frame).expect("readback");
     assert_eq!((w, hgt), (frame.size[0], frame.size[1]));
+    if GOLDENS.contains(&name) {
+        golden::assert_golden(env!("CARGO_MANIFEST_DIR"), name, w, hgt, &px, golden::Tolerance::RENDER, &format!("Headless viewport render: {name}"));
+    }
     if let Ok(dir) = std::env::var("TC_SNAPSHOT_DIR") {
         image::save_buffer(format!("{dir}/{name}.png"), &px, w, hgt, image::ColorType::Rgba8).expect("save snapshot");
     }

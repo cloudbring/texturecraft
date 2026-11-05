@@ -29,3 +29,4 @@ wasm-bindgen-futures = "0.4"
 
 [dev-dependencies]
 image = { workspace = true }
+craft-compare = { workspace = true }

@@ -1,0 +1,6 @@
+asset:        wire3d_on.png
+title:        Headless viewport render: wire3d_on
+author:       TextureCraft contributors
+source:       original work (rendered by TextureCraft's own renderer from procedural content; no external media)
+license:      MIT OR Apache-2.0
+notes:        Golden reference image (1/2 scale, 240x180). Regenerate with TC_BLESS=1.

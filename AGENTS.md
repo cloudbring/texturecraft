@@ -139,8 +139,11 @@ panic. The shared standard is `../craftrules/standards/never-crash.md`.
 9. **Verify UI changes visually.** Launch with `--control <port>` and call `ui.screenshot` (whole
    window) or `viewport.screenshot`; look at the PNG. Without a visible screen (a locked machine,
    CI), render the whole window offscreen:
-   `TC_UI_SNAPSHOTS=<dir> cargo test -p texturecraft-ui-egui --release --test ui_snapshots -- --ignored`
-   (add `CRAFT_FONTS_DIR=<craft-fonts checkout>` to see the release fonts).
+   `TC_UI_SNAPSHOTS=<dir> cargo test -p texturecraft-ui-egui --release --test ui_snapshots`
+   (add `CRAFT_FONTS_DIR=<craft-fonts checkout>` to see the release fonts). The same test compares each
+   scene with `crates/ui-egui/tests/goldens/` and fails on a difference; after an intended UI change
+   re-bless with `TC_BLESS=1` and review the PNG diff (see the README there; the viewport renders
+   in `crates/render/tests/goldens/` work the same).
 
 ## 4. Picking work
 

@@ -1,0 +1,6 @@
+asset:        ui-mode-bake-unchecked.png
+title:        TextureCraft window snapshot: mode-bake-unchecked
+author:       TextureCraft contributors
+source:       original work (rendered by TextureCraft's own renderer from procedural content; no external media)
+license:      MIT OR Apache-2.0
+notes:        Golden reference image (1/4 scale, 400x240). Regenerate with TC_BLESS=1.

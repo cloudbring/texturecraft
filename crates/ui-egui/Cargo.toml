@@ -50,3 +50,4 @@ eframe = { workspace = true, features = ["x11"] }
 # Offscreen pictures of the whole window (tests/ui_snapshots.rs).
 egui_kittest = { version = "0.37", features = ["wgpu", "eframe"] }
 image = { workspace = true }
+craft-compare = { workspace = true }
